@@ -41,7 +41,8 @@ ts_compression_settings_equal(const CompressionSettings *left, const Compression
 		   ts_array_equal(left->fd.orderby, right->fd.orderby) &&
 		   ts_array_equal(left->fd.orderby_desc, right->fd.orderby_desc) &&
 		   ts_array_equal(left->fd.orderby_nullsfirst, right->fd.orderby_nullsfirst) &&
-		   ts_sparse_index_equal(left->fd.index, right->fd.index);
+		   ts_sparse_index_equal(left->fd.index, right->fd.index) &&
+		   ts_array_equal(left->fd.algorithm, right->fd.algorithm);
 }
 
 /*
@@ -197,6 +198,13 @@ ts_compression_settings_materialize(const CompressionSettings *src, Oid relid, O
 															  src->fd.orderby_nullsfirst,
 															  src->fd.index);
 
+	/* Propagate algorithm settings if present */
+	if (src->fd.algorithm)
+	{
+		dst->fd.algorithm = src->fd.algorithm;
+		ts_compression_settings_update(dst);
+	}
+
 	return dst;
 }
 
@@ -227,6 +235,7 @@ ts_compression_settings_create(Oid relid, Oid compress_relid, ArrayType *segment
 	fd.orderby_desc = orderby_desc;
 	fd.orderby_nullsfirst = orderby_nullsfirst;
 	fd.index = sparse_index;
+	fd.algorithm = NULL; /* set separately via update if needed */
 
 	rel = table_open(catalog_get_table_id(catalog, COMPRESSION_SETTINGS), RowExclusiveLock);
 
@@ -315,6 +324,16 @@ compression_settings_fill_from_tuple(CompressionSettings *settings, TupleInfo *t
 	{
 		fd->index =
 			DatumGetJsonbPCopy(values[AttrNumberGetAttrOffset(Anum_compression_settings_index)]);
+	}
+
+	if (nulls[AttrNumberGetAttrOffset(Anum_compression_settings_algorithm)])
+	{
+		fd->algorithm = NULL;
+	}
+	else
+	{
+		fd->algorithm = DatumGetArrayTypePCopy(
+			values[AttrNumberGetAttrOffset(Anum_compression_settings_algorithm)]);
 	}
 
 	MemoryContextSwitchTo(old);
@@ -709,6 +728,16 @@ compression_settings_formdata_make_tuple(const FormData_compression_settings *fd
 	else
 	{
 		nulls[AttrNumberGetAttrOffset(Anum_compression_settings_index)] = true;
+	}
+
+	if (fd->algorithm)
+	{
+		values[AttrNumberGetAttrOffset(Anum_compression_settings_algorithm)] =
+			PointerGetDatum(fd->algorithm);
+	}
+	else
+	{
+		nulls[AttrNumberGetAttrOffset(Anum_compression_settings_algorithm)] = true;
 	}
 
 	return heap_form_tuple(desc, values, nulls);

@@ -1986,7 +1986,8 @@ compression_settings_set_manually_for_alter(Hypertable *ht, CompressionSettings 
 
 	if (with_clause_options[AlterTableFlagSegmentBy].is_default &&
 		with_clause_options[AlterTableFlagOrderBy].is_default &&
-		with_clause_options[AlterTableFlagIndex].is_default)
+		with_clause_options[AlterTableFlagIndex].is_default &&
+		with_clause_options[AlterTableFlagAlgorithm].is_default)
 	{
 		return;
 	}
@@ -2030,6 +2031,12 @@ compression_settings_set_manually_for_alter(Hypertable *ht, CompressionSettings 
 		settings->fd.index = ts_add_orderby_sparse_index(settings);
 	}
 
+	if (!with_clause_options[AlterTableFlagAlgorithm].is_default)
+	{
+		settings->fd.algorithm =
+			ts_compress_hypertable_parse_algorithm(with_clause_options[AlterTableFlagAlgorithm], ht);
+	}
+
 	validate_compression_index_key_limit(settings);
 
 	/* update manual settings */
@@ -2042,7 +2049,8 @@ compression_settings_set_manually_for_create(Hypertable *ht, CompressionSettings
 {
 	if (with_clause_options[CreateTableFlagSegmentBy].is_default &&
 		with_clause_options[CreateTableFlagOrderBy].is_default &&
-		with_clause_options[CreateTableFlagIndex].is_default)
+		with_clause_options[CreateTableFlagIndex].is_default &&
+		with_clause_options[CreateTableFlagAlgorithm].is_default)
 	{
 		return;
 	}
@@ -2084,6 +2092,12 @@ compression_settings_set_manually_for_create(Hypertable *ht, CompressionSettings
 	else if (add_orderby_sparse_index)
 	{
 		settings->fd.index = ts_add_orderby_sparse_index(settings);
+	}
+
+	if (!with_clause_options[CreateTableFlagAlgorithm].is_default)
+	{
+		settings->fd.algorithm =
+			ts_compress_hypertable_parse_algorithm(with_clause_options[CreateTableFlagAlgorithm], ht);
 	}
 
 	validate_compression_index_key_limit(settings);

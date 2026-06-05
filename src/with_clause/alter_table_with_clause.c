@@ -57,6 +57,10 @@ static const WithClauseDefinition alter_table_with_clause_def[] = {
 			.arg_names = {"compress_index", "compress_sparse_index", "index", "sparse_index", NULL},
 			 .type_id = TEXTOID,
 		},
+		[AlterTableFlagAlgorithm] = {
+			.arg_names = {"compress_algorithm", "algorithm", NULL},
+			 .type_id = TEXTOID,
+		},
 };
 
 static const WithClauseDefinition sparse_index_with_clause_def[] = {
@@ -848,4 +852,127 @@ ts_compress_hypertable_parse_index(WithClauseResult index, Hypertable *hypertabl
 	{
 		return NULL;
 	}
+}
+
+/*
+ * Parse compress_algorithm option.
+ * Format: 'column_name algorithm_name[, column_name algorithm_name]...'
+ * Example: 'tags flat_dictionary, labels flat_dictionary'
+ *
+ * Returns a text[] of "colname=<algo_id>" entries (one per column), to be
+ * stored in compression_settings.algorithm and later consumed by
+ * build_column_map()/row_compressor_init() in the TSL compression module.
+ * The stored column name is the canonical attribute name (not the user's
+ * spelling), because the consumer matches it case-sensitively.
+ */
+
+/*
+ * Numeric CompressionAlgorithm id for flat_dictionary. Kept in sync with
+ * COMPRESSION_ALGORITHM_FLAT_DICTIONARY in tsl/src/compression/compression.h.
+ * Duplicated here because the Apache-licensed main tree must not include the
+ * TSL headers. The StaticAssertStmt over _END_COMPRESSION_ALGORITHMS in
+ * compression.h guards against the enum value drifting.
+ */
+#define FLAT_DICTIONARY_ALGORITHM_ID 8
+
+ArrayType *
+ts_compress_hypertable_parse_algorithm(WithClauseResult algorithm_clause, Hypertable *hypertable)
+{
+	ArrayType *result = NULL;
+
+	if (algorithm_clause.is_default)
+		return NULL;
+
+	char *rawstr = TextDatumGetCString(algorithm_clause.parsed);
+	char *str = pstrdup(rawstr);
+
+	/*
+	 * Open the hypertable once for the whole parse; the tuple descriptor is
+	 * reused to validate every column entry.
+	 */
+	Oid relid = ts_hypertable_id_to_relid(hypertable->fd.id, false);
+	Relation rel = relation_open(relid, AccessShareLock);
+	TupleDesc desc = RelationGetDescr(rel);
+
+	/* Split by comma */
+	char *saveptr = NULL;
+	char *token = strtok_r(str, ",", &saveptr);
+
+	while (token != NULL)
+	{
+		/* Trim leading spaces */
+		while (*token == ' ')
+			token++;
+
+		/* Split by space: "colname algorithmname" */
+		char *space = strchr(token, ' ');
+		if (space == NULL)
+		{
+			relation_close(rel, AccessShareLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_SYNTAX_ERROR),
+					 errmsg("invalid compress_algorithm format: '%s'", token),
+					 errhint("Expected format: 'column_name algorithm_name'")));
+		}
+
+		*space = '\0';
+		char *colname = token;
+		char *algname = space + 1;
+
+		/* Trim trailing spaces from algname */
+		size_t len = strlen(algname);
+		while (len > 0 && algname[len - 1] == ' ')
+			algname[--len] = '\0';
+
+		/*
+		 * Validate the column exists in the hypertable and capture its
+		 * canonical name. The consumer matches the stored name
+		 * case-sensitively, so we must store the real attribute name rather
+		 * than whatever case the user typed.
+		 */
+		bool col_found = false;
+		char canonical_colname[NAMEDATALEN];
+		for (int i = 0; i < desc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(desc, i);
+			if (attr->attisdropped)
+				continue;
+			if (pg_strcasecmp(NameStr(attr->attname), colname) == 0)
+			{
+				strlcpy(canonical_colname, NameStr(attr->attname), NAMEDATALEN);
+				col_found = true;
+				break;
+			}
+		}
+
+		if (!col_found)
+		{
+			relation_close(rel, AccessShareLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" does not exist", colname)));
+		}
+
+		/* Validate algorithm name and resolve to its numeric id */
+		int algo_id;
+		if (pg_strcasecmp(algname, "flat_dictionary") == 0)
+			algo_id = FLAT_DICTIONARY_ALGORITHM_ID;
+		else
+		{
+			relation_close(rel, AccessShareLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("unknown compression algorithm: \"%s\"", algname),
+					 errhint("Supported algorithms: flat_dictionary")));
+		}
+
+		/* Append "colname=<algo_id>" to the result array */
+		char *entry = psprintf("%s=%d", canonical_colname, algo_id);
+		result = ts_array_add_element_text(result, entry);
+
+		token = strtok_r(NULL, ",", &saveptr);
+	}
+
+	relation_close(rel, AccessShareLock);
+	return result;
 }

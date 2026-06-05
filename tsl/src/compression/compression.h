@@ -179,6 +179,14 @@ typedef struct RowDecompressor
 	AttrMap *attrmap;
 
 	Detoaster detoaster;
+
+	/*
+	 * Active flat_dictionary segment context, threaded explicitly into the
+	 * flat_dictionary decompression functions (no ambient/global state). Set
+	 * when a dictionary row (_ts_meta_count == 0) is read; NULL otherwise.
+	 * Lives in the decompressor's memory context for the duration of the scan.
+	 */
+	struct FlatDictionaryContext *flat_dict_ctx;
 } RowDecompressor;
 
 /*
@@ -221,6 +229,7 @@ typedef enum CompressionAlgorithm
 	COMPRESSION_ALGORITHM_BOOL,
 	COMPRESSION_ALGORITHM_NULL,
 	COMPRESSION_ALGORITHM_UUID,
+	COMPRESSION_ALGORITHM_FLAT_DICTIONARY,
 
 	/* When adding an algorithm also add a static assert statement below */
 	/* end of real values */
@@ -306,6 +315,22 @@ typedef struct RowCompressor
 	bool needs_analyze_segmentby;
 
 	List *metadata_builders; /* List of BatchMetadataBuilder */
+
+	/*
+	 * Flat dictionary two-pass compression support.
+	 * When has_flat_dict_columns is true, a two-pass approach is used:
+	 *   Pass 1: build segment-level dictionary for each flat_dict column
+	 *   Pass 2: normal row compression, but flat_dict columns get indexes
+	 */
+	bool has_flat_dict_columns;
+	/* Per-column builder pointers. NULL for non-flat_dict columns. */
+	struct FlatDictionaryBuilder **flat_dict_builders;
+	/* Per-column input attr numbers that are flat_dict. */
+	int *flat_dict_col_indexes;
+	int num_flat_dict_columns;
+	/* Tuplestore buffering rows during Pass 1 */
+	struct Tuplestorestate *flat_dict_tuplestore;
+	int64 flat_dict_buffered_rows;
 } RowCompressor;
 
 /*
@@ -358,13 +383,14 @@ pg_attribute_unused() assert_num_compression_algorithms_sane(void)
 	StaticAssertStmt(COMPRESSION_ALGORITHM_BOOL == 5, "algorithm index has changed");
 	StaticAssertStmt(COMPRESSION_ALGORITHM_NULL == 6, "algorithm index has changed");
 	StaticAssertStmt(COMPRESSION_ALGORITHM_UUID == 7, "algorithm index has changed");
+	StaticAssertStmt(COMPRESSION_ALGORITHM_FLAT_DICTIONARY == 8, "algorithm index has changed");
 
 	/*
 	 * This should change when adding a new algorithm after adding the new
 	 * algorithm to the assert list above. This statement prevents adding a
 	 * new algorithm without updating the asserts above
 	 */
-	StaticAssertStmt(_END_COMPRESSION_ALGORITHMS == 8,
+	StaticAssertStmt(_END_COMPRESSION_ALGORITHMS == 9,
 					 "number of algorithms have changed, the asserts should be updated");
 }
 
@@ -438,6 +464,15 @@ extern bool decompress_batch_next_row(RowDecompressor *decompressor, AttrNumber 
 									  int num_attnos);
 extern ArrowArray *decompress_single_column(RowDecompressor *decompressor, AttrNumber attno,
 											bool *single_value);
+
+/*
+ * Load the flat_dictionary dictionary from a dictionary row (_ts_meta_count == 0)
+ * into decompressor->flat_dict_ctx. Must be called when such a row is
+ * encountered, before decompressing the segment's following data batches. The
+ * compressed_datums array of the decompressor must already hold the dictionary
+ * row's deformed columns.
+ */
+extern void flat_dict_decompress_load_dictionary(RowDecompressor *decompressor);
 /*
  * A convenience macro to throw an error about the corrupted compressed data, if
  * the argument is false. When fuzzing is enabled, we don't show the message not

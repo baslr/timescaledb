@@ -974,6 +974,27 @@ decompress_batches_scan(Relation in_rel, Relation out_rel, Relation index_rel, S
 						  decompressor.compressed_datums,
 						  decompressor.compressed_is_nulls);
 
+		/*
+		 * Flat dictionary support: skip dictionary rows (_ts_meta_count = 0).
+		 * These contain per-segment dictionaries, not actual data rows.
+		 * Load the dictionary context for subsequent batch decompression.
+		 */
+		{
+			int32 meta_count_val = DatumGetInt32(
+				decompressor.compressed_datums[AttrNumberGetAttrOffset(meta_count_attno)]);
+			if (meta_count_val == 0)
+			{
+				/*
+				 * Dictionary row — load the segment dictionary so the following
+				 * data batches of this segment can be decompressed, then skip the
+				 * row itself for DML purposes.
+				 */
+				flat_dict_decompress_load_dictionary(&decompressor);
+				row_decompressor_reset(&decompressor);
+				continue;
+			}
+		}
+
 		/* Bloom pre-filtering for UPSERT conflict detection */
 		if (insert_slot != NULL && cdst->bloom_hasher != NULL)
 		{

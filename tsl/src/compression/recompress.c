@@ -482,6 +482,49 @@ recompress_chunk_segmentwise_impl(Chunk *uncompressed_chunk,
 
 		while (index_getnext_slot(index_scan, ForwardScanDirection, compressed_slot))
 		{
+			/*
+			 * Detect and handle a flat_dictionary dictionary row
+			 * (_ts_meta_count == 0) BEFORE match_tuple_batch. The dictionary row
+			 * carries NULL orderby min/max metadata, so match_tuple_batch would
+			 * classify it as Tuple_before/Tuple_after and never as Tuple_match —
+			 * the per-batch handling below would then never see it, the segment
+			 * dictionary would never be loaded, and the following data batches
+			 * would fail to decompress. Load the dictionary, delete the row (the
+			 * two-pass compressor re-emits a fresh one for the recompressed
+			 * segment), and move to the next compressed tuple.
+			 */
+			{
+				bool dict_should_free;
+				HeapTuple dict_tuple =
+					ExecFetchSlotHeapTuple(compressed_slot, false, &dict_should_free);
+				heap_deform_tuple(dict_tuple,
+								  compressed_rel_tupdesc,
+								  decompressor.compressed_datums,
+								  decompressor.compressed_is_nulls);
+				int32 mc = DatumGetInt32(
+					decompressor.compressed_datums[decompressor.count_compressed_attindex]);
+				if (mc == 0)
+				{
+					flat_dict_decompress_load_dictionary(&decompressor);
+
+					if (!delete_tuple_for_recompression(compressed_chunk_rel,
+														&(compressed_slot->tts_tid),
+														snapshot))
+					{
+						ereport(ERROR,
+								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+								 errmsg("aborting recompression due to concurrent updates on "
+										"compressed data, retrying with next policy run")));
+					}
+					CommandCounterIncrement();
+					if (dict_should_free)
+						heap_freetuple(dict_tuple);
+					continue;
+				}
+				if (dict_should_free)
+					heap_freetuple(dict_tuple);
+			}
+
 			/* Check if the uncompressed tuple is before, inside, or after the compressed batch */
 			if (!fullrecompress)
 			{
@@ -838,6 +881,23 @@ perform_recompression(RecompressContext *recompress_ctx, Relation compressed_chu
 						  RelationGetDescr(compressed_chunk_rel),
 						  decompressor.compressed_datums,
 						  decompressor.compressed_is_nulls);
+
+		/* Skip flat_dictionary dictionary rows (_ts_meta_count = 0) */
+		{
+			int32 mc = DatumGetInt32(
+				decompressor.compressed_datums[decompressor.count_compressed_attindex]);
+			if (mc == 0)
+			{
+				/*
+				 * Load the segment dictionary so the following data batches of
+				 * this segment can be decompressed into the tuplesort.
+				 */
+				flat_dict_decompress_load_dictionary(&decompressor);
+				if (should_free)
+					heap_freetuple(compressed_tuple);
+				continue;
+			}
+		}
 
 		row_decompressor_decompress_row_to_tuplesort(&decompressor, tuplesortstate);
 

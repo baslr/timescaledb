@@ -98,6 +98,17 @@ typedef struct DecompressContext
 
 	int32 chunk_status;
 
+	/*
+	 * Active flat_dictionary segment context for this scan, threaded explicitly
+	 * into the flat_dictionary decompression functions (no ambient/global
+	 * state). Installed when a dictionary row (count == 0) is read and used by
+	 * the following data batches of the same segment. The planner forbids
+	 * reverse scans and batch sorted merge for flat_dictionary tables, so only
+	 * one segment dictionary is ever active at a time. Allocated in a
+	 * scan-lifetime context so it survives per-batch context resets.
+	 */
+	struct FlatDictionaryContext *flat_dict_ctx;
+
 } DecompressContext;
 
 #endif /* TIMESCALEDB_DECOMPRESS_CONTEXT_H */

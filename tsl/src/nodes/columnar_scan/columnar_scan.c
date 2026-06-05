@@ -2948,6 +2948,26 @@ build_sortinfo(PlannerInfo *root, const Chunk *chunk, RelOptInfo *chunk_rel,
 	}
 
 	/*
+	 * Flat dictionary decompression relies on a single, per-backend dictionary
+	 * context that is installed when the segment's dictionary row is read and
+	 * then used by the following data batches. That assumption only holds for a
+	 * plain forward scan that reads one segment at a time in physical order.
+	 *
+	 * Reverse scans would read the dictionary row after its data batches, and
+	 * batch sorted merge interleaves batches from multiple segments (hence
+	 * multiple dictionaries) at once. Both would use the wrong/missing
+	 * dictionary. Until per-segment dictionary caching exists, refuse to push
+	 * any ordering down for tables that use flat_dictionary: returning the
+	 * zeroed sort_info disables compressed sort, batch sorted merge and reverse,
+	 * so the planner adds an explicit Sort above a forward ColumnarScan instead.
+	 */
+	if (compression_info->settings->fd.algorithm != NULL &&
+		ts_array_length(compression_info->settings->fd.algorithm) > 0)
+	{
+		return sort_info;
+	}
+
+	/*
 	 * Translate the pathkeys to chunk expressions, creating a List of them
 	 * parallel to the pathkeys list, with NULL entries if we didn't find a
 	 * match.

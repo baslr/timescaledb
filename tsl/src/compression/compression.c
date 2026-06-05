@@ -24,6 +24,7 @@
 #include <utils/snapmgr.h>
 #include <utils/syscache.h>
 #include <utils/typcache.h>
+#include <utils/tuplestore.h>
 
 #include "compat/compat.h"
 
@@ -31,6 +32,7 @@
 #include "algorithms/bool_compress.h"
 #include "algorithms/deltadelta.h"
 #include "algorithms/dictionary.h"
+#include "algorithms/flat_dictionary.h"
 #include "algorithms/gorilla.h"
 #include "algorithms/null.h"
 #include "algorithms/uuid_compress.h"
@@ -71,6 +73,7 @@ static const CompressionAlgorithmDefinition definitions[_END_COMPRESSION_ALGORIT
 	[COMPRESSION_ALGORITHM_BOOL] = BOOL_COMPRESS_ALGORITHM_DEFINITION,
 	[COMPRESSION_ALGORITHM_NULL] = NULL_COMPRESS_ALGORITHM_DEFINITION,
 	[COMPRESSION_ALGORITHM_UUID] = UUID_COMPRESS_ALGORITHM_DEFINITION,
+	[COMPRESSION_ALGORITHM_FLAT_DICTIONARY] = FLAT_DICTIONARY_ALGORITHM_DEFINITION,
 };
 
 static NameData compression_algorithm_name[] = {
@@ -82,6 +85,7 @@ static NameData compression_algorithm_name[] = {
 	[COMPRESSION_ALGORITHM_BOOL] = { "BOOL" },
 	[COMPRESSION_ALGORITHM_NULL] = { "NULL" },
 	[COMPRESSION_ALGORITHM_UUID] = { "UUID" },
+	[COMPRESSION_ALGORITHM_FLAT_DICTIONARY] = { "FLAT_DICTIONARY" },
 };
 
 Name
@@ -94,6 +98,58 @@ static Compressor *
 compressor_for_type(Oid type)
 {
 	CompressionAlgorithm algorithm = compression_get_default_algorithm(type);
+	if (algorithm >= _END_COMPRESSION_ALGORITHMS)
+	{
+		elog(ERROR, "invalid compression algorithm %d", algorithm);
+	}
+
+	return definitions[algorithm].compressor_for_type(type);
+}
+
+/*
+ * Look up the per-column compression algorithm override for a column.
+ *
+ * settings->fd.algorithm is a text[] of "colname=<algo_id>" entries produced by
+ * ts_compress_hypertable_parse_algorithm. Returns the algorithm id for the
+ * named column, or _INVALID_COMPRESSION_ALGORITHM if the column has no
+ * override. The column-name match is case-sensitive (the stored name is the
+ * canonical attribute name).
+ */
+static CompressionAlgorithm
+flat_dict_algo_for_column(const CompressionSettings *settings, const char *attname)
+{
+	if (settings->fd.algorithm == NULL)
+		return _INVALID_COMPRESSION_ALGORITHM;
+
+	int nalg = ts_array_length(settings->fd.algorithm);
+	size_t attname_len = strlen(attname);
+	for (int ai = 1; ai <= nalg; ai++)
+	{
+		const char *entry = ts_array_get_element_text(settings->fd.algorithm, ai);
+		const char *eq = strchr(entry, '=');
+		if (eq == NULL)
+			continue;
+		size_t namelen = (size_t) (eq - entry);
+		if (namelen == attname_len && strncmp(entry, attname, namelen) == 0)
+			return (CompressionAlgorithm) atoi(eq + 1);
+	}
+	return _INVALID_COMPRESSION_ALGORITHM;
+}
+
+/*
+ * Return a compressor for a column, respecting per-column algorithm overrides.
+ * If algorithm_override is _INVALID_COMPRESSION_ALGORITHM, falls back to type default.
+ */
+static Compressor *
+compressor_for_column(Oid type, CompressionAlgorithm algorithm_override)
+{
+	CompressionAlgorithm algorithm;
+
+	if (algorithm_override != _INVALID_COMPRESSION_ALGORITHM)
+		algorithm = algorithm_override;
+	else
+		algorithm = compression_get_default_algorithm(type);
+
 	if (algorithm >= _END_COMPRESSION_ALGORITHMS)
 	{
 		elog(ERROR, "invalid compression algorithm %d", algorithm);
@@ -159,6 +215,10 @@ static ArrayType *analyze_and_get_segmentby(CompressionSettings *settings,
 
 static void compressor_apply_segmentby_and_rebuild(RowCompressor *old_compressor,
 												   BulkWriter *old_bulk_writer);
+
+static void flat_dict_pass1_feed_row(RowCompressor *row_compressor, TupleTableSlot *slot);
+static void flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer);
+static void flat_dict_reset_builders(RowCompressor *row_compressor);
 
 /********************
  ** compress_chunk **
@@ -521,7 +581,13 @@ compress_chunk(Oid in_table, Oid out_table, int insert_options)
 			}
 		}
 
-		if (row_compressor.rows_compressed_into_current_value > 0)
+		/* Flush last segment: flat_dict buffered rows or normal batch */
+		if (row_compressor.has_flat_dict_columns &&
+			row_compressor.flat_dict_buffered_rows > 0)
+		{
+			flat_dict_finalize_segment(&row_compressor, &writer);
+		}
+		else if (row_compressor.rows_compressed_into_current_value > 0)
 		{
 			row_compressor_flush(&row_compressor, &writer, true);
 		}
@@ -963,8 +1029,12 @@ build_column_map(const CompressionSettings *settings, const TupleDesc in_desc,
 																	 bloom_attr_offset));
 				}
 
+				/* Check for per-column algorithm override */
+				CompressionAlgorithm col_algo =
+					flat_dict_algo_for_column(settings, NameStr(attr->attname));
+
 				*column = (PerColumn){
-					.compressor = compressor_for_type(attr->atttypid),
+					.compressor = compressor_for_column(attr->atttypid, col_algo),
 					.segmentby_column_index = -1,
 				};
 			}
@@ -1327,6 +1397,66 @@ row_compressor_init(RowCompressor *row_compressor, const CompressionSettings *se
 		check_for_limited_size_compressors(row_compressor->per_column,
 										   row_compressor->n_input_columns);
 
+	/*
+	 * Detect flat_dictionary columns. If any exist, we need two-pass compression.
+	 */
+	row_compressor->has_flat_dict_columns = false;
+	row_compressor->flat_dict_builders = NULL;
+	row_compressor->flat_dict_col_indexes = NULL;
+	row_compressor->num_flat_dict_columns = 0;
+
+	if (settings->fd.algorithm)
+	{
+		int nalg = ts_array_length(settings->fd.algorithm);
+		if (nalg > 0)
+		{
+			row_compressor->flat_dict_builders =
+				MemoryContextAllocZero(row_compressor_context,
+									   sizeof(FlatDictionaryBuilder *) * noncompressed_tupdesc->natts);
+			row_compressor->flat_dict_col_indexes =
+				MemoryContextAlloc(row_compressor_context,
+								   sizeof(int) * noncompressed_tupdesc->natts);
+			int nfd = 0;
+
+			for (int col = 0; col < noncompressed_tupdesc->natts; col++)
+			{
+				Form_pg_attribute attr = TupleDescAttr(noncompressed_tupdesc, col);
+				if (attr->attisdropped)
+					continue;
+				if (flat_dict_algo_for_column(settings, NameStr(attr->attname)) !=
+					COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+					continue;
+
+				row_compressor->flat_dict_builders[col] =
+					flat_dictionary_builder_alloc(attr->atttypid);
+				/* Link the builder to the compressor for index width */
+				if (row_compressor->per_column[col].compressor != NULL)
+				{
+					flat_dictionary_compressor_set_builder(
+						row_compressor->per_column[col].compressor,
+						row_compressor->flat_dict_builders[col]);
+				}
+				row_compressor->flat_dict_col_indexes[nfd] = col;
+				nfd++;
+			}
+			row_compressor->num_flat_dict_columns = nfd;
+			row_compressor->has_flat_dict_columns = (nfd > 0);
+		}
+	}
+
+	/* Initialize tuplestore for buffering if flat_dict is active */
+	if (row_compressor->has_flat_dict_columns)
+	{
+		row_compressor->flat_dict_tuplestore =
+			tuplestore_begin_heap(false, false, work_mem);
+		row_compressor->flat_dict_buffered_rows = 0;
+	}
+	else
+	{
+		row_compressor->flat_dict_tuplestore = NULL;
+		row_compressor->flat_dict_buffered_rows = 0;
+	}
+
 	MemoryContextSwitchTo(old_context);
 }
 
@@ -1356,7 +1486,13 @@ row_compressor_append_sorted_rows(RowCompressor *row_compressor, Tuplesortstate 
 		}
 	}
 
-	if (row_compressor->rows_compressed_into_current_value > 0)
+	/* Flush last segment: flat_dict buffered rows or normal batch */
+	if (row_compressor->has_flat_dict_columns &&
+		row_compressor->flat_dict_buffered_rows > 0)
+	{
+		flat_dict_finalize_segment(row_compressor, writer);
+	}
+	else if (row_compressor->rows_compressed_into_current_value > 0)
 	{
 		row_compressor_flush(row_compressor, writer, true);
 	}
@@ -1447,20 +1583,46 @@ row_compressor_process_ordered_slot(RowCompressor *row_compressor, TupleTableSlo
 		row_compressor->first_iteration = false;
 	}
 	bool changed_groups = row_compressor_new_row_is_in_new_group(row_compressor, slot);
-	bool compressed_row_is_full = row_compressor_is_full(row_compressor, slot);
-	if (compressed_row_is_full || changed_groups)
+
+	/*
+	 * Flat dictionary two-pass mode: buffer rows into tuplestore during
+	 * Pass 1. On segment boundary, finalize dictionary and replay.
+	 */
+	if (row_compressor->has_flat_dict_columns)
 	{
-		if (row_compressor->rows_compressed_into_current_value > 0)
-		{
-			row_compressor_flush(row_compressor, writer, changed_groups);
-		}
 		if (changed_groups)
 		{
+			/* Segment boundary — finalize the buffered segment */
+			if (row_compressor->flat_dict_buffered_rows > 0)
+			{
+				flat_dict_finalize_segment(row_compressor, writer);
+			}
 			row_compressor_update_group(row_compressor, slot);
 		}
-	}
 
-	row_compressor_append_row(row_compressor, slot);
+		/* Pass 1: feed flat_dict columns to builders, buffer row */
+		flat_dict_pass1_feed_row(row_compressor, slot);
+		tuplestore_puttupleslot(row_compressor->flat_dict_tuplestore, slot);
+		row_compressor->flat_dict_buffered_rows++;
+	}
+	else
+	{
+		/* Standard (non-flat_dict) path */
+		bool compressed_row_is_full = row_compressor_is_full(row_compressor, slot);
+		if (compressed_row_is_full || changed_groups)
+		{
+			if (row_compressor->rows_compressed_into_current_value > 0)
+			{
+				row_compressor_flush(row_compressor, writer, changed_groups);
+			}
+			if (changed_groups)
+			{
+				row_compressor_update_group(row_compressor, slot);
+			}
+		}
+
+		row_compressor_append_row(row_compressor, slot);
+	}
 	MemoryContextSwitchTo(old_ctx);
 }
 
@@ -1551,7 +1713,23 @@ row_compressor_append_row(RowCompressor *row_compressor, TupleTableSlot *row)
 		}
 		else
 		{
-			compressor->append_val(compressor, val);
+			/*
+			 * For flat_dictionary columns, add the value to the segment
+			 * dictionary (which assigns or returns the index), then pass
+			 * the index as a Datum to the compressor.
+			 */
+			if (row_compressor->has_flat_dict_columns &&
+				row_compressor->flat_dict_builders &&
+				row_compressor->flat_dict_builders[col] != NULL)
+			{
+				uint32 idx = flat_dictionary_builder_add(
+					row_compressor->flat_dict_builders[col], val);
+				compressor->append_val(compressor, UInt32GetDatum(idx));
+			}
+			else
+			{
+				compressor->append_val(compressor, val);
+			}
 		}
 	}
 
@@ -1782,7 +1960,253 @@ row_compressor_close(RowCompressor *row_compressor)
 	pfree(row_compressor->uncompressed_col_to_compressed_col);
 	FreeTupleDesc(row_compressor->out_desc);
 
+	if (row_compressor->flat_dict_tuplestore)
+	{
+		tuplestore_end(row_compressor->flat_dict_tuplestore);
+		row_compressor->flat_dict_tuplestore = NULL;
+	}
+
 	MemoryContextDelete(row_compressor->row_compressor_context);
+}
+
+/*************************************
+ ** Flat Dictionary Two-Pass Helpers **
+ *************************************/
+
+/*
+ * Pass 1: Feed flat_dict columns to their builders (dictionary construction).
+ * Called for each row during buffering phase.
+ */
+static void
+flat_dict_pass1_feed_row(RowCompressor *row_compressor, TupleTableSlot *slot)
+{
+	for (int i = 0; i < row_compressor->num_flat_dict_columns; i++)
+	{
+		int col = row_compressor->flat_dict_col_indexes[i];
+		FlatDictionaryBuilder *builder = row_compressor->flat_dict_builders[col];
+		bool is_null;
+		Datum val = slot_getattr(slot, AttrOffsetGetAttrNumber(col), &is_null);
+		if (!is_null)
+		{
+			flat_dictionary_builder_add(builder, val);
+		}
+	}
+}
+
+/*
+ * Finalize a segment when using flat_dictionary two-pass mode:
+ * 1. Finish dictionary builders and determine index widths
+ * 2. Write dictionary row (Row 0: _ts_meta_count = 0) into compressed table
+ * 3. Set FlatDictionaryContext so batch compressors can determine width
+ * 4. Replay all buffered rows through normal compression (Pass 2)
+ * 5. Reset builders and tuplestore for next segment
+ */
+static void
+flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer)
+{
+	/*
+	 * Step 1: Finish the builders and get serialized dictionary blobs.
+	 * For each flat_dict column, we write the dictionary data into the
+	 * dictionary row in place of the normal compressed data.
+	 */
+
+	/* Build dictionary row — set _ts_meta_count = 0 to mark it */
+	memset(row_compressor->compressed_is_null, true,
+		   sizeof(bool) * row_compressor->out_desc->natts);
+
+	/* Set count = 0 to mark this as dictionary row */
+	row_compressor->compressed_values[row_compressor->count_metadata_column_offset] =
+		Int32GetDatum(0);
+	row_compressor->compressed_is_null[row_compressor->count_metadata_column_offset] = false;
+
+	/* Set segmentby values (they're the same for the whole segment) */
+	for (int col = 0; col < row_compressor->n_input_columns; col++)
+	{
+		PerColumn *column = &row_compressor->per_column[col];
+		if (column->segment_info != NULL)
+		{
+			int16 compressed_col = row_compressor->uncompressed_col_to_compressed_col[col];
+			row_compressor->compressed_values[compressed_col] = column->segment_info->val;
+			row_compressor->compressed_is_null[compressed_col] = column->segment_info->is_null;
+		}
+	}
+
+	/* For each flat_dict column, serialize the dictionary and store in row */
+	for (int i = 0; i < row_compressor->num_flat_dict_columns; i++)
+	{
+		int col = row_compressor->flat_dict_col_indexes[i];
+		FlatDictionaryBuilder *builder = row_compressor->flat_dict_builders[col];
+		void *dict_blob = flat_dictionary_builder_finish(builder);
+
+		int16 compressed_col = row_compressor->uncompressed_col_to_compressed_col[col];
+		if (dict_blob != NULL)
+		{
+			row_compressor->compressed_values[compressed_col] = PointerGetDatum(dict_blob);
+			row_compressor->compressed_is_null[compressed_col] = false;
+		}
+		else
+		{
+			row_compressor->compressed_is_null[compressed_col] = true;
+		}
+	}
+
+	/* Insert dictionary row */
+	HeapTuple dict_tuple = heap_form_tuple(row_compressor->out_desc,
+										   row_compressor->compressed_values,
+										   row_compressor->compressed_is_null);
+	heap_insert(writer->out_rel,
+				dict_tuple,
+				writer->mycid,
+				writer->insert_options,
+				writer->bistate);
+	if (writer->indexstate->ri_NumIndices > 0)
+	{
+		ts_catalog_index_insert(writer->indexstate, dict_tuple);
+	}
+	heap_freetuple(dict_tuple);
+	row_compressor->num_compressed_rows++;
+
+	/*
+	 * Step 2: Replay buffered tuples through normal compression (Pass 2).
+	 * The modified row_compressor_append_row will call builder_add() which
+	 * returns the existing index (lookup) for each value.
+	 * The compressor's finish() reads cardinality from the builder back-pointer.
+	 */
+	TupleTableSlot *replay_slot = MakeTupleTableSlot(row_compressor->in_desc, &TTSOpsMinimalTuple);
+	tuplestore_rescan(row_compressor->flat_dict_tuplestore);
+
+	while (tuplestore_gettupleslot(row_compressor->flat_dict_tuplestore,
+								   true, false, replay_slot))
+	{
+		slot_getallattrs(replay_slot);
+
+		/* Check batch fullness */
+		bool is_full = row_compressor_is_full(row_compressor, replay_slot);
+		if (is_full && row_compressor->rows_compressed_into_current_value > 0)
+		{
+			row_compressor_flush(row_compressor, writer, false);
+		}
+
+		row_compressor_append_row(row_compressor, replay_slot);
+		ExecClearTuple(replay_slot);
+	}
+
+	/* Flush last batch of the segment */
+	if (row_compressor->rows_compressed_into_current_value > 0)
+	{
+		row_compressor_flush(row_compressor, writer, true);
+	}
+
+	ExecDropSingleTupleTableSlot(replay_slot);
+
+	/* Step 3: Reset for next segment */
+	flat_dict_reset_builders(row_compressor);
+}
+
+/*
+ * Reset flat_dict builders and tuplestore for the next segment.
+ */
+static void
+flat_dict_reset_builders(RowCompressor *row_compressor)
+{
+	/* Clear tuplestore */
+	tuplestore_clear(row_compressor->flat_dict_tuplestore);
+	row_compressor->flat_dict_buffered_rows = 0;
+
+	/* Reallocate builders for next segment */
+	for (int i = 0; i < row_compressor->num_flat_dict_columns; i++)
+	{
+		int col = row_compressor->flat_dict_col_indexes[i];
+		Form_pg_attribute attr = TupleDescAttr(row_compressor->in_desc, col);
+		/* Old builder is freed with its memory context or we just overwrite */
+		row_compressor->flat_dict_builders[col] =
+			flat_dictionary_builder_alloc(attr->atttypid);
+		/* Re-link to compressor */
+		if (row_compressor->per_column[col].compressor != NULL)
+		{
+			flat_dictionary_compressor_set_builder(
+				row_compressor->per_column[col].compressor,
+				row_compressor->flat_dict_builders[col]);
+		}
+	}
+}
+
+/*
+ * Load a flat_dictionary dictionary from a dictionary row during decompression.
+ * The dictionary row has _ts_meta_count = 0 and contains the serialized
+ * dictionary blob in the compressed column.
+ *
+ * We deserialize it into a FlatDictionaryContext and store it on the
+ * decompressor (decompressor->flat_dict_ctx), from where the flat_dictionary
+ * decompression functions read it explicitly. The context is allocated in
+ * CurrentMemoryContext, which in every caller spans the whole decompression of
+ * the segment, so it outlives the data batches that reference it.
+ *
+ * Shared by every bulk decompression loop: decompress_chunk, recompression and
+ * DML decompression.
+ */
+void
+flat_dict_decompress_load_dictionary(RowDecompressor *decompressor)
+{
+	/*
+	 * Scan all compressed columns in this row to find the dictionary blob.
+	 * In a dictionary row, flat_dict columns contain the serialized dictionary
+	 * (an ArrayCompressed blob) instead of the normal FlatDictionaryCompressed
+	 * index batch.
+	 */
+	for (int col = 0; col < decompressor->in_desc->natts; col++)
+	{
+		PerCompressedColumn *column_info = &decompressor->per_compressed_cols[col];
+
+		/* Skip metadata columns and segmentby columns */
+		if (column_info->decompressed_column_offset < 0)
+			continue;
+		if (!column_info->is_compressed)
+			continue;
+		if (decompressor->compressed_is_nulls[col])
+			continue;
+
+		/*
+		 * Detoast before inspecting the algorithm byte: a large dictionary
+		 * (the whole point of this algorithm) is stored out-of-line, so the
+		 * raw datum is a TOAST pointer whose first bytes are NOT the
+		 * compression header.
+		 */
+		Datum compressed_datum = PointerGetDatum(
+			detoaster_detoast_attr_copy((struct varlena *) DatumGetPointer(
+											decompressor->compressed_datums[col]),
+										&decompressor->detoaster,
+										CurrentMemoryContext));
+		CompressedDataHeader *header = (CompressedDataHeader *) DatumGetPointer(compressed_datum);
+
+		/*
+		 * The dictionary blob is serialized via ArrayCompressor, so its
+		 * algorithm tag is COMPRESSION_ALGORITHM_ARRAY. Use this to identify
+		 * the column carrying the dictionary.
+		 */
+		if (header->compression_algorithm == COMPRESSION_ALGORITHM_ARRAY)
+		{
+			int output_index = column_info->decompressed_column_offset;
+			Form_pg_attribute out_attr = TupleDescAttr(decompressor->out_desc, output_index);
+			Oid element_type = out_attr->atttypid;
+
+			/*
+			 * The dictionary must outlive every batch that references it. In the
+			 * bulk decompress_chunk path CurrentMemoryContext spans the whole
+			 * decompression loop, so it is the right home here. Store it on the
+			 * decompressor (no ambient global state) so init_iterator /
+			 * decompress_single_column can thread it into the flat_dictionary
+			 * decompression functions.
+			 */
+			decompressor->flat_dict_ctx =
+				flat_dictionary_context_from_array_blob(compressed_datum,
+														element_type,
+														CurrentMemoryContext);
+
+			/* Only one flat_dict column per dictionary row for now */
+			break;
+		}
+	}
 }
 
 /******************
@@ -2010,6 +2434,7 @@ build_decompressor(const TupleDesc in_desc, const TupleDesc out_desc)
 		.decompressed_slots = (TupleTableSlot **) palloc0(sizeof(void *) * default_allocated_slots),
 		.decompressed_slots_capacity = default_allocated_slots,
 		.attrmap = attrmap,
+		.flat_dict_ctx = NULL,
 	};
 
 	create_per_compressed_column(&decompressor);
@@ -2092,6 +2517,20 @@ decompress_chunk(Oid in_table, Oid out_table)
 		if (should_free)
 		{
 			heap_freetuple(tuple);
+		}
+
+		/*
+		 * Flat dictionary support: detect dictionary rows (_ts_meta_count = 0).
+		 * These contain the per-segment dictionary, not actual compressed data.
+		 * We deserialize the dictionary and set the context for subsequent batches.
+		 */
+		int32 meta_count =
+			DatumGetInt32(decompressor.compressed_datums[decompressor.count_compressed_attindex]);
+		if (meta_count == 0)
+		{
+			/* Dictionary row — extract and cache the dictionary context */
+			flat_dict_decompress_load_dictionary(&decompressor);
+			continue;
 		}
 
 		row_decompressor_decompress_row_to_table(&decompressor, &writer);
@@ -2195,6 +2634,18 @@ init_iterator(RowDecompressor *decompressor, CompressedDataHeader *header, int i
 		column_info->iterator = NULL;
 		decompressor->compressed_is_nulls[input_column] = true;
 		decompressor->decompressed_is_nulls[column_info->decompressed_column_offset] = true;
+		return;
+	}
+
+	/*
+	 * flat_dictionary needs the segment dictionary, which the generic vtable
+	 * cannot carry, so dispatch it explicitly with the context loaded from the
+	 * dictionary row.
+	 */
+	if (header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+	{
+		column_info->iterator = tsl_flat_dictionary_decompression_iterator_from_datum_forward(
+			PointerGetDatum(header), column_info->decompressed_type, decompressor->flat_dict_ctx);
 		return;
 	}
 
@@ -2505,6 +2956,18 @@ decompress_single_column(RowDecompressor *decompressor, AttrNumber attno, bool *
 	{
 		*single_value = true;
 		return make_single_value_arrow(column_info->decompressed_type, (Datum) NULL, true);
+	}
+
+	/*
+	 * flat_dictionary needs the segment dictionary, which the generic vtable
+	 * cannot carry, so dispatch it explicitly.
+	 */
+	if (header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+	{
+		return flat_dictionary_decompress_all(compressed_datum,
+											  column_info->decompressed_type,
+											  decompressor->flat_dict_ctx,
+											  decompressor->per_compressed_row_ctx);
 	}
 
 	DecompressAllFunction decompress_all =

@@ -15,6 +15,7 @@
 
 #include "compression/arrow_c_data_interface.h"
 #include "compression/compression.h"
+#include "compression/algorithms/flat_dictionary.h"
 #include "debug_assert.h"
 #include "guc.h"
 #include "nodes/columnar_scan/compressed_batch.h"
@@ -238,17 +239,31 @@ decompress_column(DecompressContext *dcontext, DecompressBatchState *batch_state
 				MemoryContextGetParent(batch_state->per_batch_context));
 		}
 
-		DecompressAllFunction decompress_all =
-			tsl_get_decompress_all_function(header->compression_algorithm,
-											column_description->typid);
-		Assert(decompress_all != NULL);
-
 		MemoryContext context_before_decompression =
 			MemoryContextSwitchTo(dcontext->bulk_decompression_context);
 
-		arrow = decompress_all(PointerGetDatum(header),
-							   column_description->typid,
-							   batch_state->per_batch_context);
+		if (header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+		{
+			/*
+			 * flat_dictionary needs the segment dictionary, threaded explicitly
+			 * from the scan context (installed when the dictionary row was read).
+			 */
+			arrow = flat_dictionary_decompress_all(PointerGetDatum(header),
+												   column_description->typid,
+												   dcontext->flat_dict_ctx,
+												   batch_state->per_batch_context);
+		}
+		else
+		{
+			DecompressAllFunction decompress_all =
+				tsl_get_decompress_all_function(header->compression_algorithm,
+												column_description->typid);
+			Assert(decompress_all != NULL);
+
+			arrow = decompress_all(PointerGetDatum(header),
+								   column_description->typid,
+								   batch_state->per_batch_context);
+		}
 
 		MemoryContextSwitchTo(context_before_decompression);
 
@@ -260,10 +275,20 @@ decompress_column(DecompressContext *dcontext, DecompressBatchState *batch_state
 		/* As a fallback, decompress row-by-row. */
 		column_values->decompression_type = DT_Iterator;
 		MemoryContext old_context = MemoryContextSwitchTo(batch_state->per_batch_context);
-		column_values->buffers[0] =
-			tsl_get_decompression_iterator_init(header->compression_algorithm,
-												dcontext->reverse)(PointerGetDatum(header),
-																   column_description->typid);
+		if (header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+		{
+			/* Forward only: the planner forbids reverse scans for flat_dictionary. */
+			column_values->buffers[0] =
+				tsl_flat_dictionary_decompression_iterator_from_datum_forward(
+					PointerGetDatum(header), column_description->typid, dcontext->flat_dict_ctx);
+		}
+		else
+		{
+			column_values->buffers[0] =
+				tsl_get_decompression_iterator_init(header->compression_algorithm,
+													dcontext->reverse)(PointerGetDatum(header),
+																	   column_description->typid);
+		}
 		MemoryContextSwitchTo(old_context);
 		return;
 	}
@@ -907,6 +932,71 @@ compressed_batch_lazy_init(DecompressContext *dcontext, DecompressBatchState *ba
 }
 
 /*
+ * Load a flat_dictionary dictionary row (identified by _ts_meta_count == 0)
+ * during a columnar scan and install it as the active dictionary context.
+ *
+ * The dictionary column of the row holds an ArrayCompressed blob of the
+ * segment's unique values. We detoast it (a large dictionary is stored
+ * out-of-line), materialize it into a FlatDictionaryContext, and install it so
+ * that subsequent data batches in the same segment can resolve their indexes.
+ *
+ * Lifetime: the dictionary must survive the per-batch context resets that
+ * happen between batches, so it is allocated in the PARENT of per_batch_context
+ * (the scan-lifetime context, the same parent used for bulk decompression).
+ *
+ * Forward scans see the dictionary row before its data batches because the
+ * compressor heap_inserts it first. Reverse scans and batch-sorted-merge are
+ * not yet supported (see the planner guard added for flat_dictionary).
+ */
+static void
+compressed_batch_load_flat_dict(DecompressContext *dcontext, DecompressBatchState *batch_state,
+								TupleTableSlot *compressed_slot)
+{
+	for (int i = 0; i < dcontext->num_columns_with_metadata; i++)
+	{
+		CompressionColumnDescription *column_description = &dcontext->compressed_chunk_columns[i];
+
+		if (column_description->type != COMPRESSED_COLUMN)
+			continue;
+
+		bool isnull;
+		Datum value = slot_getattr(compressed_slot,
+								   column_description->compressed_scan_attno,
+								   &isnull);
+		if (isnull)
+			continue;
+
+		/*
+		 * Detoast before inspecting the algorithm byte: the raw datum may be a
+		 * TOAST pointer whose leading bytes are not the compression header.
+		 * Materialize the dictionary into the scan-lifetime parent context.
+		 */
+		MemoryContext dict_mctx = MemoryContextGetParent(batch_state->per_batch_context);
+		struct varlena *detoasted =
+			detoaster_detoast_attr_copy((struct varlena *) DatumGetPointer(value),
+										&dcontext->detoaster,
+										dict_mctx);
+		CompressedDataHeader *header = (CompressedDataHeader *) detoasted;
+
+		if (header->compression_algorithm == COMPRESSION_ALGORITHM_ARRAY)
+		{
+			/*
+			 * Store the context on the scan's DecompressContext (no ambient
+			 * global state). The following data batches of this segment read it
+			 * via dcontext->flat_dict_ctx. It is allocated in the scan-lifetime
+			 * parent context above, so it survives per-batch resets.
+			 */
+			dcontext->flat_dict_ctx =
+				flat_dictionary_context_from_array_blob(PointerGetDatum(detoasted),
+														column_description->typid,
+														dict_mctx);
+			/* Only one flat_dict column per dictionary row for now */
+			return;
+		}
+	}
+}
+
+/*
  * Initialize the batch decompression state with the new compressed  tuple.
  */
 void
@@ -1009,7 +1099,22 @@ compressed_batch_set_compressed_tuple(DecompressContext *dcontext,
 				/* count column should never be NULL */
 				Assert(!isnull);
 				int count_value = DatumGetInt32(value);
-				if (count_value <= 0)
+
+				/*
+				 * Flat dictionary: count == 0 marks a dictionary row. It holds
+				 * the per-segment dictionary, not data rows. Load and install
+				 * the dictionary so the following data batches can resolve their
+				 * indexes, then mark this batch empty so the caller advances to
+				 * the next (real) batch.
+				 */
+				if (count_value == 0)
+				{
+					compressed_batch_load_flat_dict(dcontext, batch_state, compressed_slot);
+					batch_state->total_batch_rows = 0;
+					return;
+				}
+
+				if (count_value < 0)
 				{
 					ereport(ERROR,
 							(errmsg("the compressed data is corrupt: got a segment with length %d",
@@ -1168,6 +1273,16 @@ postgres_qual(DecompressContext *dcontext, DecompressBatchState *batch_state)
 void
 compressed_batch_advance(DecompressContext *dcontext, DecompressBatchState *batch_state)
 {
+	/*
+	 * Flat dictionary: dictionary rows have total_batch_rows == 0.
+	 * Mark the batch as exhausted immediately so the caller fetches next.
+	 */
+	if (batch_state->total_batch_rows == 0)
+	{
+		ExecClearTuple(compressed_batch_current_tuple(batch_state));
+		return;
+	}
+
 	Assert(batch_state->total_batch_rows > 0);
 
 	TupleTableSlot *decompressed_scan_slot = &batch_state->decompressed_scan_slot_data.base;

@@ -21,6 +21,7 @@ typedef enum AlterTableFlags
 	AlterTableFlagOrderBy,
 	AlterTableFlagCompressChunkTimeInterval,
 	AlterTableFlagIndex,
+	AlterTableFlagAlgorithm,
 	AlterTableFlagsMax
 } AlterTableFlags;
 
@@ -51,3 +52,13 @@ extern TSDLLEXPORT OrderBySettings ts_compress_parse_order_collist(char *inpstr,
 																   Hypertable *hypertable);
 extern TSDLLEXPORT Jsonb *ts_compress_hypertable_parse_index(WithClauseResult index,
 															 Hypertable *hypertable);
+
+/*
+ * Parse the `compress_algorithm` option into a text[] of "colname=<algo_id>"
+ * entries, suitable for storage in compression_settings.algorithm. The
+ * <algo_id> is the numeric CompressionAlgorithm enum value (e.g. 8 for
+ * flat_dictionary); see ts_compress_hypertable_parse_algorithm for the
+ * name->id mapping. Returns NULL when the option is at its default.
+ */
+extern TSDLLEXPORT ArrayType *
+ts_compress_hypertable_parse_algorithm(WithClauseResult algorithm_clause, Hypertable *hypertable);
