@@ -1839,6 +1839,34 @@ compressed_rel_setup_reltarget(RelOptInfo *compressed_rel, CompressionInfo *info
 											COMPRESSION_COLUMN_METADATA_COUNT_NAME,
 											&attrs_used);
 
+	/*
+	 * For flat_dictionary tables, always pull every segmentby column into the
+	 * compressed scan output, even if the query does not otherwise reference it.
+	 * The executor identifies each data batch's segment dictionary by that
+	 * batch's segmentby values, so those columns must be present in the scan
+	 * tuple for the per-segment dictionary cache to key on. Without this, a
+	 * query that selects only a flat_dictionary column (and no segmentby column)
+	 * would have no way to look up the right dictionary.
+	 */
+	if (info->settings->fd.algorithm != NULL &&
+		ts_array_length(info->settings->fd.algorithm) > 0 &&
+		info->settings->fd.segmentby != NULL)
+	{
+		int num_segmentby = ts_array_length(info->settings->fd.segmentby);
+		for (int sb = 1; sb <= num_segmentby; sb++)
+		{
+			const char *segmentby_name =
+				ts_array_get_element_text(info->settings->fd.segmentby, sb);
+			/* Skip dropped columns defensively. */
+			if (get_attnum(compressed_relid, segmentby_name) == InvalidAttrNumber)
+				continue;
+			compressed_reltarget_add_var_for_column(compressed_rel,
+													compressed_relid,
+													segmentby_name,
+													&attrs_used);
+		}
+	}
+
 	/* add the sequence number or orderby metadata columns if we try to order by them*/
 	if (needs_sequence_num)
 	{
@@ -2943,26 +2971,6 @@ build_sortinfo(PlannerInfo *root, const Chunk *chunk, RelOptInfo *chunk_rel,
 	SortInfo sort_info = { 0 };
 
 	if (pathkeys == NIL)
-	{
-		return sort_info;
-	}
-
-	/*
-	 * Flat dictionary decompression relies on a single, per-backend dictionary
-	 * context that is installed when the segment's dictionary row is read and
-	 * then used by the following data batches. That assumption only holds for a
-	 * plain forward scan that reads one segment at a time in physical order.
-	 *
-	 * Reverse scans would read the dictionary row after its data batches, and
-	 * batch sorted merge interleaves batches from multiple segments (hence
-	 * multiple dictionaries) at once. Both would use the wrong/missing
-	 * dictionary. Until per-segment dictionary caching exists, refuse to push
-	 * any ordering down for tables that use flat_dictionary: returning the
-	 * zeroed sort_info disables compressed sort, batch sorted merge and reverse,
-	 * so the planner adds an explicit Sort above a forward ColumnarScan instead.
-	 */
-	if (compression_info->settings->fd.algorithm != NULL &&
-		ts_array_length(compression_info->settings->fd.algorithm) > 0)
 	{
 		return sort_info;
 	}

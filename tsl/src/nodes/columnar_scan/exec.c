@@ -31,6 +31,7 @@
 #include "nodes/columnar_scan/exec.h"
 #include "nodes/columnar_scan/planner.h"
 #include "ts_catalog/array_utils.h"
+#include "ts_catalog/compression_settings.h"
 
 #if PG18_GE
 #include <commands/explain_format.h>
@@ -283,6 +284,24 @@ columnar_scan_begin(CustomScanState *node, EState *estate, int eflags)
 	dcontext->custom_scan_slot = node->ss.ss_ScanTupleSlot;
 	dcontext->uncompressed_chunk_tdesc = RelationGetDescr(node->ss.ss_currentRelation);
 	dcontext->ps = &node->ss.ps;
+
+	/*
+	 * Wire up flat_dictionary per-segment dictionary resolution. chunk_relid is
+	 * the uncompressed chunk, used to locate the compressed chunk for the
+	 * one-shot dictionary prefetch. has_flat_dict_columns gates the per-batch
+	 * dictionary resolution so non-flat_dictionary scans pay nothing.
+	 */
+	dcontext->chunk_relid = chunk_state->chunk_relid;
+	dcontext->flat_dict_cache = NULL;
+	dcontext->has_flat_dict_columns = false;
+	{
+		CompressionSettings *settings = ts_compression_settings_get(chunk_state->chunk_relid);
+		if (settings != NULL && settings->fd.algorithm != NULL &&
+			ts_array_length(settings->fd.algorithm) > 0)
+		{
+			dcontext->has_flat_dict_columns = true;
+		}
+	}
 
 	TupleDesc desc = dcontext->custom_scan_slot->tts_tupleDescriptor;
 

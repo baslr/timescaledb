@@ -116,3 +116,52 @@ jeweils ihr eigenes Dictionary nachschlagen → der Guard wird überflüssig.
 - `tsl/src/nodes/columnar_scan/columnar_scan.c` (Guard entfernen)
 - `tsl/src/compression/compression.h`
 - `tsl/src/compression/compression.c`
+
+## Umsetzung (erledigt) — Abweichungen vom ursprünglichen Plan
+
+Die Implementierung weicht in zwei wesentlichen Punkten vom obigen Entwurf ab,
+weil die ursprüngliche Annahme („Map befüllt sich beim Lesen der Dict-Row, dann
+können verschränkte Batches ihr Dictionary nachschlagen") nicht ausreicht:
+
+1. **Dict-Rows werden NACH ihren Daten einsortiert, nicht nur bei Reverse.**
+   Die Dict-Row trägt NULL für seqnum und orderby-min/max (`flat_dict_finalize_segment`).
+   Sobald *irgendeine* Sortierung gepusht wird (Compressed-Sort, Reverse,
+   Batch-Sorted-Merge), landet die Dict-Row hinter den Datenbatches ihres
+   Segments. Ein reines „fill-on-encounter" würde dort einen Datenbatch erreichen,
+   bevor sein Dictionary geladen ist. Lösung: **value-keyed Map** (Schlüssel =
+   serialisierte segmentby-Werte) **+ einmaliger Prefetch bei Cache-Miss**, der
+   den komprimierten Chunk seq-scannt und alle `count==0`-Dict-Rows lädt.
+
+2. **Schlüssel = segmentby-Werte, nicht TID/Position.** Compressor schreibt die
+   segmentby-Werte von Dict-Row und Datenbatches aus derselben `SegmentInfo`
+   (`compression.c` Z. 1790 / 2029) → byte-identischer, eindeutiger Schlüssel.
+   Damit der Executor diesen Schlüssel bilden kann, werden segmentby-Spalten für
+   flat_dict-Tabellen **erzwungen in den komprimierten Scan-Output** gezogen
+   (`compressed_rel_setup_reltarget`), auch wenn die Query sie nicht referenziert.
+
+**Scope-Einschränkung:** Nur der Columnar-Scan bekommt die Map. Die Bulk-Pfade
+(`decompress_chunk`, Recompress, DML) bleiben beim Einzel-Slot
+`RowDecompressor.flat_dict_ctx` — sie sind reine Forward-Reads, bei denen die
+Dict-Row immer vor ihren Daten kommt, also schon korrekt.
+
+### Tatsächlich geänderte/neue Dateien
+
+- **neu** `tsl/src/nodes/columnar_scan/flat_dict_cache.{h,c}` — Map (simplehash,
+  Schlüssel = serialisierte segmentby-Bytes) + `flat_dict_cache_prefetch`.
+- `decompress_context.h` — `flat_dict_cache`, `chunk_relid`,
+  `has_flat_dict_columns` statt Einzel-Slot.
+- `compressed_batch.{c,h}` — per-Batch-Auflösung (`flat_dict_ctx` am
+  BatchState), Reverse-Iterator erlaubt, fill-on-encounter + Prefetch-on-miss.
+- `columnar_scan.c` — Guard entfernt; segmentby-Forcing im Reltarget.
+- `exec.c` — neue dcontext-Felder am Scan-Init gesetzt.
+- `nodes/columnar_scan/CMakeLists.txt`, `test/sql/CMakeLists.txt` — Registrierung.
+- **neu** `tsl/test/sql/compress_flat_dict_pushdown.sql` — Regression-Tests.
+
+> Hinweis: `compression.{c,h}` wurden — anders als oben vermutet — NICHT
+> geändert, weil die Bulk-Pfade bewusst unangetastet bleiben.
+
+### Offen (serverseitig, kein lokaler Compiler)
+
+`pg_config`/PG-Header fehlen auf dem Entwicklungsrechner. Build + Test
+(`make && make installcheck` für `compress_flat_dict_pushdown`) sowie das
+Generieren der erwarteten `.out`-Datei müssen auf dem Remote-Server laufen.

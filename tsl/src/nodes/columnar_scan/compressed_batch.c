@@ -19,6 +19,7 @@
 #include "debug_assert.h"
 #include "guc.h"
 #include "nodes/columnar_scan/compressed_batch.h"
+#include "nodes/columnar_scan/flat_dict_cache.h"
 #include "nodes/columnar_scan/vector_dict.h"
 #include "nodes/columnar_scan/vector_predicates.h"
 #include "nodes/columnar_scan/vector_quals.h"
@@ -245,12 +246,13 @@ decompress_column(DecompressContext *dcontext, DecompressBatchState *batch_state
 		if (header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
 		{
 			/*
-			 * flat_dictionary needs the segment dictionary, threaded explicitly
-			 * from the scan context (installed when the dictionary row was read).
+			 * flat_dictionary needs the segment dictionary, resolved for this
+			 * batch from the scan's per-segment cache (keyed by the batch's
+			 * segmentby values) and stored on the batch state.
 			 */
 			arrow = flat_dictionary_decompress_all(PointerGetDatum(header),
 												   column_description->typid,
-												   dcontext->flat_dict_ctx,
+												   batch_state->flat_dict_ctx,
 												   batch_state->per_batch_context);
 		}
 		else
@@ -277,10 +279,22 @@ decompress_column(DecompressContext *dcontext, DecompressBatchState *batch_state
 		MemoryContext old_context = MemoryContextSwitchTo(batch_state->per_batch_context);
 		if (header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
 		{
-			/* Forward only: the planner forbids reverse scans for flat_dictionary. */
+			/*
+			 * Per-batch segment dictionary from the cache. The reverse iterator
+			 * is selected for reverse scans; the cache makes the dictionary
+			 * available regardless of whether its dictionary row has been seen
+			 * yet in scan order.
+			 */
 			column_values->buffers[0] =
-				tsl_flat_dictionary_decompression_iterator_from_datum_forward(
-					PointerGetDatum(header), column_description->typid, dcontext->flat_dict_ctx);
+				dcontext->reverse ?
+					tsl_flat_dictionary_decompression_iterator_from_datum_reverse(
+						PointerGetDatum(header),
+						column_description->typid,
+						batch_state->flat_dict_ctx) :
+					tsl_flat_dictionary_decompression_iterator_from_datum_forward(
+						PointerGetDatum(header),
+						column_description->typid,
+						batch_state->flat_dict_ctx);
 		}
 		else
 		{
@@ -932,26 +946,81 @@ compressed_batch_lazy_init(DecompressContext *dcontext, DecompressBatchState *ba
 }
 
 /*
+ * Lazily create the scan's per-segment flat_dictionary cache. The segmentby
+ * columns (in compressed-scan-output attno order, which the planner emits in
+ * the canonical fd.segmentby order) are read from the decompression context.
+ * The cache lives in the scan-lifetime parent of per_batch_context so it and
+ * the dictionaries it holds survive per-batch resets.
+ */
+static void
+compressed_batch_ensure_flat_dict_cache(DecompressContext *dcontext,
+										DecompressBatchState *batch_state)
+{
+	if (dcontext->flat_dict_cache != NULL)
+		return;
+
+	MemoryContext cache_mctx = MemoryContextGetParent(batch_state->per_batch_context);
+	MemoryContext old = MemoryContextSwitchTo(cache_mctx);
+
+	/* Count segmentby columns. */
+	int num_segmentby = 0;
+	for (int i = 0; i < dcontext->num_data_columns; i++)
+	{
+		if (dcontext->compressed_chunk_columns[i].type == SEGMENTBY_COLUMN)
+			num_segmentby++;
+	}
+
+	FlatDictSegmentbyColumn *cols = NULL;
+	if (num_segmentby > 0)
+	{
+		cols = palloc(sizeof(FlatDictSegmentbyColumn) * num_segmentby);
+		int n = 0;
+		for (int i = 0; i < dcontext->num_data_columns; i++)
+		{
+			CompressionColumnDescription *cd = &dcontext->compressed_chunk_columns[i];
+			if (cd->type != SEGMENTBY_COLUMN)
+				continue;
+			cols[n].compressed_scan_attno = cd->compressed_scan_attno;
+			cols[n].typid = cd->typid;
+			/*
+			 * Column name is identical in the compressed and uncompressed
+			 * chunks (compression keeps column names). Resolve it from the
+			 * uncompressed chunk descriptor via the column's uncompressed attno.
+			 */
+			cols[n].column_name =
+				get_attname(dcontext->chunk_relid, cd->uncompressed_chunk_attno, false);
+			n++;
+		}
+		Assert(n == num_segmentby);
+	}
+
+	dcontext->flat_dict_cache = flat_dict_cache_create(cache_mctx, num_segmentby, cols);
+
+	MemoryContextSwitchTo(old);
+}
+
+/*
  * Load a flat_dictionary dictionary row (identified by _ts_meta_count == 0)
- * during a columnar scan and install it as the active dictionary context.
+ * during a columnar scan into the scan's per-segment dictionary cache, keyed by
+ * the row's segmentby values.
  *
  * The dictionary column of the row holds an ArrayCompressed blob of the
  * segment's unique values. We detoast it (a large dictionary is stored
- * out-of-line), materialize it into a FlatDictionaryContext, and install it so
- * that subsequent data batches in the same segment can resolve their indexes.
+ * out-of-line), materialize it into a FlatDictionaryContext, and store it in
+ * the cache so that the segment's data batches — in any scan order — can resolve
+ * their indexes.
  *
  * Lifetime: the dictionary must survive the per-batch context resets that
  * happen between batches, so it is allocated in the PARENT of per_batch_context
- * (the scan-lifetime context, the same parent used for bulk decompression).
- *
- * Forward scans see the dictionary row before its data batches because the
- * compressor heap_inserts it first. Reverse scans and batch-sorted-merge are
- * not yet supported (see the planner guard added for flat_dictionary).
+ * (the scan-lifetime context, the same parent used for bulk decompression and
+ * the cache itself).
  */
 static void
 compressed_batch_load_flat_dict(DecompressContext *dcontext, DecompressBatchState *batch_state,
 								TupleTableSlot *compressed_slot)
 {
+	compressed_batch_ensure_flat_dict_cache(dcontext, batch_state);
+
 	for (int i = 0; i < dcontext->num_columns_with_metadata; i++)
 	{
 		CompressionColumnDescription *column_description = &dcontext->compressed_chunk_columns[i];
@@ -981,19 +1050,59 @@ compressed_batch_load_flat_dict(DecompressContext *dcontext, DecompressBatchStat
 		if (header->compression_algorithm == COMPRESSION_ALGORITHM_ARRAY)
 		{
 			/*
-			 * Store the context on the scan's DecompressContext (no ambient
-			 * global state). The following data batches of this segment read it
-			 * via dcontext->flat_dict_ctx. It is allocated in the scan-lifetime
-			 * parent context above, so it survives per-batch resets.
+			 * Materialize the dictionary in the scan-lifetime context and store
+			 * it in the per-segment cache keyed by this row's segmentby values
+			 * (read from compressed_slot). Fill-on-encounter: forward scans hit
+			 * the dictionary row before the segment's data batches, so the cache
+			 * is populated just in time; the reordered read modes fall back to a
+			 * prefetch on miss (see compressed_batch_resolve_flat_dict).
 			 */
-			dcontext->flat_dict_ctx =
+			FlatDictionaryContext *ctx =
 				flat_dictionary_context_from_array_blob(PointerGetDatum(detoasted),
 														column_description->typid,
 														dict_mctx);
+			flat_dict_cache_insert(dcontext->flat_dict_cache, compressed_slot, ctx);
 			/* Only one flat_dict column per dictionary row for now */
 			return;
 		}
 	}
+}
+
+/*
+ * Resolve the segment dictionary for the current data batch and store it on the
+ * batch state. Looks the batch's segmentby values up in the per-segment cache.
+ * On a miss — which happens only for the reordered read modes (reverse / batch
+ * sorted merge / compressed sort), where a data batch can be reached before its
+ * dictionary row — perform a one-shot prefetch of the whole compressed chunk's
+ * dictionary rows and look up again. A miss after prefetch means the data is
+ * corrupt (a data batch with no matching dictionary row).
+ */
+static void
+compressed_batch_resolve_flat_dict(DecompressContext *dcontext,
+								   DecompressBatchState *batch_state,
+								   TupleTableSlot *compressed_slot)
+{
+	compressed_batch_ensure_flat_dict_cache(dcontext, batch_state);
+
+	FlatDictionaryContext *ctx =
+		flat_dict_cache_lookup(dcontext->flat_dict_cache, compressed_slot);
+
+	if (ctx == NULL)
+	{
+		/* Reordered read reached a data batch before its dictionary row. */
+		MemoryContext dict_mctx = MemoryContextGetParent(batch_state->per_batch_context);
+		flat_dict_cache_prefetch(dcontext->flat_dict_cache, dcontext->chunk_relid, dict_mctx);
+		ctx = flat_dict_cache_lookup(dcontext->flat_dict_cache, compressed_slot);
+	}
+
+	if (ctx == NULL)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("flat_dictionary: no segment dictionary found for compressed batch")));
+	}
+
+	batch_state->flat_dict_ctx = ctx;
 }
 
 /*
@@ -1019,6 +1128,8 @@ compressed_batch_set_compressed_tuple(DecompressContext *dcontext,
 
 	batch_state->total_batch_rows = 0;
 	batch_state->next_batch_row = 0;
+	/* Reset any dictionary resolved for a previously recycled batch. */
+	batch_state->flat_dict_ctx = NULL;
 
 	MemoryContextReset(batch_state->per_batch_context);
 
@@ -1134,6 +1245,18 @@ compressed_batch_set_compressed_tuple(DecompressContext *dcontext,
 				 */
 				break;
 		}
+	}
+
+	/*
+	 * Resolve this data batch's segment dictionary before any column is
+	 * decompressed. Gated on has_flat_dict_columns so non-flat_dictionary scans
+	 * skip it entirely. Dictionary rows (count == 0) returned above and never
+	 * reach here. The resolved context is read by decompress_column for every
+	 * flat_dictionary column of this batch.
+	 */
+	if (dcontext->has_flat_dict_columns)
+	{
+		compressed_batch_resolve_flat_dict(dcontext, batch_state, compressed_slot);
 	}
 
 	CompressedBatchVectorQualState cbvqstate = {

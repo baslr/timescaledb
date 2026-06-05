@@ -99,15 +99,39 @@ typedef struct DecompressContext
 	int32 chunk_status;
 
 	/*
-	 * Active flat_dictionary segment context for this scan, threaded explicitly
-	 * into the flat_dictionary decompression functions (no ambient/global
-	 * state). Installed when a dictionary row (count == 0) is read and used by
-	 * the following data batches of the same segment. The planner forbids
-	 * reverse scans and batch sorted merge for flat_dictionary tables, so only
-	 * one segment dictionary is ever active at a time. Allocated in a
-	 * scan-lifetime context so it survives per-batch context resets.
+	 * Per-segment flat_dictionary cache for this scan. Maps a segment (keyed by
+	 * its serialized segmentby values) to its FlatDictionaryContext, so that any
+	 * number of segment dictionaries can be active at once. This is what allows
+	 * reverse scans, batch sorted merge and compressed sort pushdown for
+	 * flat_dictionary tables: those read modes reorder the dictionary rows
+	 * relative to their data batches (or interleave batches from several
+	 * segments), so a single active dictionary is not enough.
+	 *
+	 * Forward, non-reordered scans fill the cache on the fly as they encounter
+	 * each segment's dictionary row (count == 0). The reordered read modes may
+	 * reach a data batch before its dictionary row; the first such miss triggers
+	 * a one-shot prefetch (flat_dict_cache_prefetch) that scans the compressed
+	 * chunk and loads every dictionary row into the cache, after which all
+	 * lookups hit. NULL until the first flat_dictionary column is seen.
+	 *
+	 * Allocated in a scan-lifetime context so it (and every dictionary in it)
+	 * survives the per-batch context resets.
 	 */
-	struct FlatDictionaryContext *flat_dict_ctx;
+	struct FlatDictCache *flat_dict_cache;
+
+	/*
+	 * Oid of the uncompressed chunk relation for this scan. Used to locate the
+	 * compressed chunk for the one-shot dictionary prefetch above. Set at exec
+	 * init time. InvalidOid if not applicable.
+	 */
+	Oid chunk_relid;
+
+	/*
+	 * True if this scan's table has at least one flat_dictionary column. Set at
+	 * exec init from the compression settings. Gates the per-batch dictionary
+	 * resolution so non-flat_dictionary scans pay nothing.
+	 */
+	bool has_flat_dict_columns;
 
 } DecompressContext;
 

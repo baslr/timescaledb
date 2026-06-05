@@ -105,6 +105,16 @@ typedef struct DecompressBatchState
 	MemoryContext per_batch_context;
 
 	/*
+	 * For flat_dictionary columns: the segment dictionary resolved for this
+	 * batch from the scan's per-segment cache (keyed by the batch's segmentby
+	 * values). Threaded into the flat_dictionary decompression functions instead
+	 * of a single scan-wide slot, so reverse scans and batch sorted merge — which
+	 * keep several segments' batches in flight at once — each see the right
+	 * dictionary. NULL for batches with no flat_dictionary column.
+	 */
+	struct FlatDictionaryContext *flat_dict_ctx;
+
+	/*
 	 * Arrow-style bitmap that says whether the vector quals passed for a given
 	 * row. Indexed same as arrow arrays, w/o accounting for the reverse scan
 	 * direction. Initialized to all ones, i.e. all rows pass.
