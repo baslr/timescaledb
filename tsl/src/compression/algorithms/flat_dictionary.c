@@ -77,6 +77,8 @@ flat_dictionary_context_from_array_blob(Datum array_blob, Oid element_type, Memo
 		ArrowArray *dict_arrow = decompress_all_fn(array_blob, element_type, dest_mctx);
 
 		num_values = dict_arrow->length;
+		elog(DEBUG1, "flat_dictionary_context_from_array_blob: num_values=%u, null_count=%ld",
+			 num_values, dict_arrow->null_count);
 		values = palloc(sizeof(Datum) * num_values);
 
 		if (typlen == -1)
@@ -693,7 +695,10 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 		for (uint16 i = 0; i < n; i++)
 		{
 			uint32 idx = flat_dict_read_index(index_data, header->index_width, i);
-			Assert(idx < ctx->num_values);
+			if (idx >= ctx->num_values)
+				elog(ERROR, "flat_dictionary decompress: index %u >= num_values %u "
+					 "(row %u of %u, index_width=%u, has_nulls=%u)",
+					 idx, ctx->num_values, i, n, header->index_width, header->has_nulls);
 			Datum val = ctx->values[idx];
 			total_data_size += VARSIZE_ANY_EXHDR(DatumGetPointer(val));
 		}

@@ -272,7 +272,7 @@ SELECT time, device, tags FROM fd_many ORDER BY time DESC LIMIT 5;
 CREATE TABLE fd_large_segment(
     time timestamptz NOT NULL,
     device text NOT NULL,
-    tags text NOT NULL
+    tags text
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'time',
@@ -282,10 +282,14 @@ CREATE TABLE fd_large_segment(
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
 -- 2000 rows in a single segment (device = 'dev0') — well above batch size (1000)
+-- Tags are 100-2100 bytes long (matching real-world data: avg 202, max 2107)
 INSERT INTO fd_large_segment
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev0',
-       'tag-' || (g % 5)
+       CASE WHEN g % 50 = 0 THEN NULL
+            ELSE '["' || g % 200 || '","process-name-' || (g % 5) || '","' ||
+                 repeat('x', 100 + (g % 2000)) || '"]'
+       END
 FROM generate_series(1, 2000) g;
 -- This must not crash:
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_large_segment') ch;
@@ -293,11 +297,11 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('fd_large_segment') ch;
 -------
      1
 
--- Verify data survives round-trip
-SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
- total | distinct_tags 
--------+---------------
-  2000 |             5
+-- Verify data survives round-trip (read back from compressed)
+SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
+ total | non_null | distinct_tags 
+-------+----------+---------------
+  2000 |     1960 |          1960
 
 DROP TABLE fd_large_segment CASCADE;
 --------------------------------------------------------------------------------
@@ -405,7 +409,7 @@ CREATE TABLE fd_wide_dict(
 INSERT INTO fd_wide_dict
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev0',
-       'tag-' || (g % 300)
+       '["' || (g % 300) || '","' || repeat('y', 100 + (g % 2000)) || '"]'
 FROM generate_series(1, 500) g;
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_wide_dict') ch;
  count 
@@ -416,22 +420,22 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('fd_wide_dict') ch;
 SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_wide_dict;
  total | distinct_tags 
 -------+---------------
-   500 |           300
+   500 |           500
 
 -- Spot check some values
 SELECT time, tags FROM fd_wide_dict ORDER BY time LIMIT 3;
-             time             | tags  
-------------------------------+-------
- Wed Jan 01 00:00:01 2025 UTC | tag-1
- Wed Jan 01 00:00:02 2025 UTC | tag-2
- Wed Jan 01 00:00:03 2025 UTC | tag-3
+             time             |                                                      tags                                                       
+------------------------------+-----------------------------------------------------------------------------------------------------------------
+ Wed Jan 01 00:00:01 2025 UTC | ["1","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ Wed Jan 01 00:00:02 2025 UTC | ["2","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ Wed Jan 01 00:00:03 2025 UTC | ["3","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
 
 SELECT time, tags FROM fd_wide_dict ORDER BY time DESC LIMIT 3;
-             time             |  tags   
-------------------------------+---------
- Wed Jan 01 00:08:20 2025 UTC | tag-200
- Wed Jan 01 00:08:19 2025 UTC | tag-199
- Wed Jan 01 00:08:18 2025 UTC | tag-198
+             time             |                                                                                                                                                                                                                                                                                                                tags                                                                                                                                                                                                                                                                                                                
+------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Wed Jan 01 00:08:20 2025 UTC | ["200","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ Wed Jan 01 00:08:19 2025 UTC | ["199","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ Wed Jan 01 00:08:18 2025 UTC | ["198","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
 
 DROP TABLE fd_wide_dict CASCADE;
 --------------------------------------------------------------------------------
@@ -507,7 +511,7 @@ DROP TABLE fd_empty_seg CASCADE;
 CREATE TABLE fd_stress(
     time timestamptz NOT NULL,
     device text NOT NULL,
-    tags text NOT NULL
+    tags text
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'time',
@@ -519,38 +523,40 @@ CREATE TABLE fd_stress(
 INSERT INTO fd_stress
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev' || (g % 5),
-       'tag-' || (g % 10)
+       CASE WHEN g % 100 = 0 THEN NULL
+            ELSE '["' || (g % 1000) || '","cmd-' || (g % 10) || '","' || repeat(chr(65 + (g % 26)), 80 + (g % 2000)) || '"]'
+       END
 FROM generate_series(1, 7500) g;
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_stress') ch;
  count 
 -------
      1
 
--- Verify all data intact after round-trip
-SELECT device, count(*) AS rows, count(DISTINCT tags) AS distinct_tags
+-- Verify all data intact after round-trip (reads from compressed chunks)
+SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM fd_stress GROUP BY device ORDER BY device;
- device | rows | distinct_tags 
---------+------+---------------
- dev0   | 1500 |             2
- dev1   | 1500 |             2
- dev2   | 1500 |             2
- dev3   | 1500 |             2
- dev4   | 1500 |             2
+ device | rows | non_null | distinct_tags 
+--------+------+----------+---------------
+ dev0   | 1500 |     1425 |          1425
+ dev1   | 1500 |     1500 |          1500
+ dev2   | 1500 |     1500 |          1500
+ dev3   | 1500 |     1500 |          1500
+ dev4   | 1500 |     1500 |          1500
 
 -- Verify ordering preserved
-SELECT time, device, tags FROM fd_stress ORDER BY time ASC LIMIT 3;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 00:00:01 2025 UTC | dev1   | tag-1
- Wed Jan 01 00:00:02 2025 UTC | dev2   | tag-2
- Wed Jan 01 00:00:03 2025 UTC | dev3   | tag-3
+SELECT time, device, left(tags, 30) AS tags_prefix FROM fd_stress ORDER BY time ASC LIMIT 3;
+             time             | device |          tags_prefix           
+------------------------------+--------+--------------------------------
+ Wed Jan 01 00:00:01 2025 UTC | dev1   | ["1","cmd-1","BBBBBBBBBBBBBBBB
+ Wed Jan 01 00:00:02 2025 UTC | dev2   | ["2","cmd-2","CCCCCCCCCCCCCCCC
+ Wed Jan 01 00:00:03 2025 UTC | dev3   | ["3","cmd-3","DDDDDDDDDDDDDDDD
 
-SELECT time, device, tags FROM fd_stress ORDER BY time DESC LIMIT 3;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 02:05:00 2025 UTC | dev0   | tag-0
- Wed Jan 01 02:04:59 2025 UTC | dev4   | tag-9
- Wed Jan 01 02:04:58 2025 UTC | dev3   | tag-8
+SELECT time, device, left(tags, 30) AS tags_prefix FROM fd_stress ORDER BY time DESC LIMIT 3;
+             time             | device |          tags_prefix           
+------------------------------+--------+--------------------------------
+ Wed Jan 01 02:05:00 2025 UTC | dev0   | 
+ Wed Jan 01 02:04:59 2025 UTC | dev4   | ["499","cmd-9","LLLLLLLLLLLLLL
+ Wed Jan 01 02:04:58 2025 UTC | dev3   | ["498","cmd-8","KKKKKKKKKKKKKK
 
 DROP TABLE fd_stress CASCADE;
 DROP TABLE fd_metrics CASCADE;

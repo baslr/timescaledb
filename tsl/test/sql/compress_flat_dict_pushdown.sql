@@ -147,7 +147,7 @@ SELECT time, device, tags FROM fd_many ORDER BY time DESC LIMIT 5;
 CREATE TABLE fd_large_segment(
     time timestamptz NOT NULL,
     device text NOT NULL,
-    tags text NOT NULL
+    tags text
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'time',
@@ -158,17 +158,21 @@ CREATE TABLE fd_large_segment(
 );
 
 -- 2000 rows in a single segment (device = 'dev0') — well above batch size (1000)
+-- Tags are 100-2100 bytes long (matching real-world data: avg 202, max 2107)
 INSERT INTO fd_large_segment
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev0',
-       'tag-' || (g % 5)
+       CASE WHEN g % 50 = 0 THEN NULL
+            ELSE '["' || g % 200 || '","process-name-' || (g % 5) || '","' ||
+                 repeat('x', 100 + (g % 2000)) || '"]'
+       END
 FROM generate_series(1, 2000) g;
 
 -- This must not crash:
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_large_segment') ch;
 
--- Verify data survives round-trip
-SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
+-- Verify data survives round-trip (read back from compressed)
+SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
 
 DROP TABLE fd_large_segment CASCADE;
 
@@ -259,7 +263,7 @@ CREATE TABLE fd_wide_dict(
 INSERT INTO fd_wide_dict
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev0',
-       'tag-' || (g % 300)
+       '["' || (g % 300) || '","' || repeat('y', 100 + (g % 2000)) || '"]'
 FROM generate_series(1, 500) g;
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_wide_dict') ch;
@@ -340,7 +344,7 @@ DROP TABLE fd_empty_seg CASCADE;
 CREATE TABLE fd_stress(
     time timestamptz NOT NULL,
     device text NOT NULL,
-    tags text NOT NULL
+    tags text
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'time',
@@ -353,20 +357,67 @@ CREATE TABLE fd_stress(
 INSERT INTO fd_stress
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev' || (g % 5),
-       'tag-' || (g % 10)
+       CASE WHEN g % 100 = 0 THEN NULL
+            ELSE '["' || (g % 1000) || '","cmd-' || (g % 10) || '","' || repeat(chr(65 + (g % 26)), 80 + (g % 2000)) || '"]'
+       END
 FROM generate_series(1, 7500) g;
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_stress') ch;
 
--- Verify all data intact after round-trip
-SELECT device, count(*) AS rows, count(DISTINCT tags) AS distinct_tags
+-- Verify all data intact after round-trip (reads from compressed chunks)
+SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM fd_stress GROUP BY device ORDER BY device;
 
 -- Verify ordering preserved
-SELECT time, device, tags FROM fd_stress ORDER BY time ASC LIMIT 3;
-SELECT time, device, tags FROM fd_stress ORDER BY time DESC LIMIT 3;
+SELECT time, device, left(tags, 30) AS tags_prefix FROM fd_stress ORDER BY time ASC LIMIT 3;
+SELECT time, device, left(tags, 30) AS tags_prefix FROM fd_stress ORDER BY time DESC LIMIT 3;
 
 DROP TABLE fd_stress CASCADE;
+
+--------------------------------------------------------------------------------
+-- Regression: decompression with many segments (tests per-segment cache lookup)
+-- The cache must return the correct dictionary for each (host, metric) segment.
+-- With many segments that have DIFFERENT dictionary cardinalities, a cache
+-- mismatch would cause idx >= num_values and crash.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_decompress_many(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    tags text
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'host, metric',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+-- 20 hosts × 5 metrics = 100 segments. Each segment has different number of
+-- distinct tags (3 to 50) with long values (200-2100 bytes). Some NULLs.
+INSERT INTO fd_decompress_many
+SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
+       'host-' || (g % 20),
+       'metric-' || (g % 5),
+       CASE WHEN g % 80 = 0 THEN NULL
+            ELSE '["' || (g % (3 + (g % 20) * 2)) || '","' ||
+                 repeat(chr(65 + (g % 26)), 100 + (g % 2000)) || '"]'
+       END
+FROM generate_series(1, 10000) g;
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_decompress_many') ch;
+
+-- Verify decompression: reading tags back must not crash
+SET max_parallel_workers_per_gather = 0;
+SELECT host, metric, count(*) AS rows, count(tags) AS non_null
+FROM fd_decompress_many
+GROUP BY host, metric
+ORDER BY host, metric
+LIMIT 10;
+RESET max_parallel_workers_per_gather;
+
+DROP TABLE fd_decompress_many CASCADE;
 
 DROP TABLE fd_metrics CASCADE;
 DROP TABLE fd_many CASCADE;

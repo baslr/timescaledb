@@ -1712,8 +1712,14 @@ row_compressor_append_row(RowCompressor *row_compressor, TupleTableSlot *row)
 				row_compressor->flat_dict_builders &&
 				row_compressor->flat_dict_builders[col] != NULL)
 			{
+				uint32 prev_next = flat_dictionary_builder_num_values(
+					row_compressor->flat_dict_builders[col]);
 				uint32 idx = flat_dictionary_builder_add(
 					row_compressor->flat_dict_builders[col], val);
+				if (idx >= prev_next && row_compressor->in_flat_dict_replay)
+					elog(WARNING, "flat_dict replay: NEW index %u assigned (prev cardinality %u) "
+						 "— value was not seen in Pass 1! col=%d",
+						 idx, prev_next, col);
 				compressor->append_val(compressor, UInt32GetDatum(idx));
 			}
 			else
@@ -2044,6 +2050,8 @@ flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer)
 	{
 		int col = row_compressor->flat_dict_col_indexes[i];
 		FlatDictionaryBuilder *builder = row_compressor->flat_dict_builders[col];
+		elog(DEBUG1, "flat_dict_finalize_segment: builder col=%d next_index=%u (= dictionary cardinality)",
+			 col, flat_dictionary_builder_num_values(builder));
 		void *dict_blob = flat_dictionary_builder_finish(builder);
 
 		int16 compressed_col = row_compressor->uncompressed_col_to_compressed_col[col];
