@@ -174,7 +174,8 @@ pg_attribute_unused() flat_dict_assertions(void)
 							 sizeof(test_val.index_width) +
 							 sizeof(test_val.padding) +
 							 sizeof(test_val.element_type) +
-							 sizeof(test_val.num_elements),
+							 sizeof(test_val.num_elements) +
+							 sizeof(test_val.trailing_pad),
 					 "FlatDictionaryCompressed wrong size");
 	StaticAssertStmt(sizeof(FlatDictionaryCompressed) == 16,
 					 "FlatDictionaryCompressed wrong size");

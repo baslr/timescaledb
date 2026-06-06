@@ -52,6 +52,7 @@ typedef struct FlatDictionaryCompressed
 	 */
 	Oid element_type;
 	uint16 num_elements;   /* number of rows in this batch */
+	uint8 trailing_pad[2]; /* explicit trailing padding for uint64 alignment */
 	/* followed by: index data (num_elements * index_width bytes) */
 	/* followed by: nulls bitmap if has_nulls (Simple8bRle) */
 	uint64 alignment_sentinel[FLEXIBLE_ARRAY_MEMBER];

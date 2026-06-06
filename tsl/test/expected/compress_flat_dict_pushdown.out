@@ -1,17 +1,13 @@
 -- This file and its contents are licensed under the Timescale License.
 -- Please see the included NOTICE for copyright information and
 -- LICENSE-TIMESCALE for a copy of the license.
-
 -- Tests for per-segment flat_dictionary dictionary caching, which lets the
 -- planner push ORDER BY down (reverse scan, batch sorted merge, compressed
 -- sort) for tables that use the flat_dictionary algorithm. Before the
 -- per-segment cache these were disabled by a planner guard and an explicit
 -- Sort was added above a forward ColumnarScan.
-
 SET timezone TO 'UTC';
-
 \set PREFIX 'EXPLAIN (buffers off, costs off, timing off, summary off)'
-
 CREATE TABLE fd_metrics(
     time timestamptz NOT NULL,
     device text NOT NULL,
@@ -23,7 +19,7 @@ CREATE TABLE fd_metrics(
     tsdb.segmentby='device',
     tsdb.compress_algorithm='tags flat_dictionary'
 );
-
+NOTICE:  using column "time" as partitioning column
 -- Two segments (device d1, d2). Multiple distinct tag values per segment so the
 -- flat_dictionary actually builds a non-trivial dictionary per segment, and the
 -- two segments get DIFFERENT dictionaries (d1: a/b/c, d2: x/y/z) to catch any
@@ -41,26 +37,43 @@ INSERT INTO fd_metrics VALUES
 ('2025-01-01 03:00:00', 'd2', 'tag-x', 31.0),
 ('2025-01-01 04:00:00', 'd2', 'tag-y', 41.0),
 ('2025-01-01 05:00:00', 'd2', 'tag-z', 36.0);
-
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_metrics') ch;
+ count 
+-------
+     1
 
 -- Verify flat_dictionary is active in catalog
 SELECT relid::regclass, segmentby, orderby, algorithm
 FROM _timescaledb_catalog.compression_settings
 WHERE relid = 'fd_metrics'::regclass;
+   relid    | segmentby | orderby | algorithm 
+------------+-----------+---------+-----------
+ fd_metrics | {device}  | {time}  | {tags=8}
 
 SET max_parallel_workers_per_gather = 0;
 SET enable_bitmapscan = 0;
 SET enable_seqscan = 0;
 SET timescaledb.enable_vectorized_aggregation = off;
-
 --------------------------------------------------------------------------------
 -- test_flat_dict_order_by_pushdown:
 -- ORDER BY time within a segment should be answered by a compressed sort
 -- pushdown / batch sorted merge, NOT a separate Sort node above ColumnarScan.
 --------------------------------------------------------------------------------
 :PREFIX SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time;
+--- QUERY PLAN ---
+ Custom Scan (ColumnarScan) on _hyper_1_1_chunk
+   ->  Index Scan Backward using compress_hyper_2_2_chunk_device__ts_meta_min_1__ts_meta_max_idx on compress_hyper_2_2_chunk
+         Index Cond: (device = 'd1'::text)
+
 SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time;
+             time             | tags  
+------------------------------+-------
+ Wed Jan 01 00:00:00 2025 UTC | tag-a
+ Wed Jan 01 01:00:00 2025 UTC | tag-b
+ Wed Jan 01 02:00:00 2025 UTC | tag-c
+ Wed Jan 01 03:00:00 2025 UTC | tag-a
+ Wed Jan 01 04:00:00 2025 UTC | tag-b
+ Wed Jan 01 05:00:00 2025 UTC | tag-c
 
 --------------------------------------------------------------------------------
 -- test_flat_dict_reverse_scan:
@@ -68,7 +81,20 @@ SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time;
 -- pushdown. The flat_dictionary values must come out correct in reverse order.
 --------------------------------------------------------------------------------
 :PREFIX SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time DESC;
+--- QUERY PLAN ---
+ Custom Scan (ColumnarScan) on _hyper_1_1_chunk
+   ->  Index Scan using compress_hyper_2_2_chunk_device__ts_meta_min_1__ts_meta_max_idx on compress_hyper_2_2_chunk
+         Index Cond: (device = 'd1'::text)
+
 SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time DESC;
+             time             | tags  
+------------------------------+-------
+ Wed Jan 01 05:00:00 2025 UTC | tag-c
+ Wed Jan 01 04:00:00 2025 UTC | tag-b
+ Wed Jan 01 03:00:00 2025 UTC | tag-a
+ Wed Jan 01 02:00:00 2025 UTC | tag-c
+ Wed Jan 01 01:00:00 2025 UTC | tag-b
+ Wed Jan 01 00:00:00 2025 UTC | tag-a
 
 --------------------------------------------------------------------------------
 -- test_flat_dict_sorted_merge_multi_segment:
@@ -78,10 +104,45 @@ SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time DESC;
 --------------------------------------------------------------------------------
 SET timescaledb.debug_require_batch_sorted_merge = 'allow';
 :PREFIX SELECT time, device, tags FROM fd_metrics ORDER BY time, device;
-SELECT time, device, tags FROM fd_metrics ORDER BY time, device;
-SELECT time, device, tags FROM fd_metrics ORDER BY time DESC, device;
-RESET timescaledb.debug_require_batch_sorted_merge;
+--- QUERY PLAN ---
+ Sort
+   Sort Key: _hyper_1_1_chunk."time", _hyper_1_1_chunk.device
+   ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk
+         ->  Seq Scan on compress_hyper_2_2_chunk
 
+SELECT time, device, tags FROM fd_metrics ORDER BY time, device;
+             time             | device | tags  
+------------------------------+--------+-------
+ Wed Jan 01 00:00:00 2025 UTC | d1     | tag-a
+ Wed Jan 01 00:00:00 2025 UTC | d2     | tag-x
+ Wed Jan 01 01:00:00 2025 UTC | d1     | tag-b
+ Wed Jan 01 01:00:00 2025 UTC | d2     | tag-y
+ Wed Jan 01 02:00:00 2025 UTC | d1     | tag-c
+ Wed Jan 01 02:00:00 2025 UTC | d2     | tag-z
+ Wed Jan 01 03:00:00 2025 UTC | d1     | tag-a
+ Wed Jan 01 03:00:00 2025 UTC | d2     | tag-x
+ Wed Jan 01 04:00:00 2025 UTC | d1     | tag-b
+ Wed Jan 01 04:00:00 2025 UTC | d2     | tag-y
+ Wed Jan 01 05:00:00 2025 UTC | d1     | tag-c
+ Wed Jan 01 05:00:00 2025 UTC | d2     | tag-z
+
+SELECT time, device, tags FROM fd_metrics ORDER BY time DESC, device;
+             time             | device | tags  
+------------------------------+--------+-------
+ Wed Jan 01 05:00:00 2025 UTC | d1     | tag-c
+ Wed Jan 01 05:00:00 2025 UTC | d2     | tag-z
+ Wed Jan 01 04:00:00 2025 UTC | d1     | tag-b
+ Wed Jan 01 04:00:00 2025 UTC | d2     | tag-y
+ Wed Jan 01 03:00:00 2025 UTC | d1     | tag-a
+ Wed Jan 01 03:00:00 2025 UTC | d2     | tag-x
+ Wed Jan 01 02:00:00 2025 UTC | d1     | tag-c
+ Wed Jan 01 02:00:00 2025 UTC | d2     | tag-z
+ Wed Jan 01 01:00:00 2025 UTC | d1     | tag-b
+ Wed Jan 01 01:00:00 2025 UTC | d2     | tag-y
+ Wed Jan 01 00:00:00 2025 UTC | d1     | tag-a
+ Wed Jan 01 00:00:00 2025 UTC | d2     | tag-x
+
+RESET timescaledb.debug_require_batch_sorted_merge;
 --------------------------------------------------------------------------------
 -- test_flat_dict_select_only_dict_column:
 -- Selecting ONLY the flat_dictionary column with an ORDER BY that triggers a
@@ -90,10 +151,28 @@ RESET timescaledb.debug_require_batch_sorted_merge;
 -- still needed to key the dictionary cache.
 --------------------------------------------------------------------------------
 SELECT tags FROM fd_metrics ORDER BY time DESC, device;
+ tags  
+-------
+ tag-c
+ tag-z
+ tag-b
+ tag-y
+ tag-a
+ tag-x
+ tag-c
+ tag-z
+ tag-b
+ tag-y
+ tag-a
+ tag-x
 
 -- Correctness cross-check: aggregate that must read every value back.
 SELECT device, count(DISTINCT tags) AS n_tags, string_agg(DISTINCT tags, ',' ORDER BY tags) AS tags
 FROM fd_metrics GROUP BY device ORDER BY device;
+ device | n_tags |       tags        
+--------+--------+-------------------
+ d1     |      3 | tag-a,tag-b,tag-c
+ d2     |      3 | tag-x,tag-y,tag-z
 
 --------------------------------------------------------------------------------
 -- Reverse + multi-segment with more than one batch per segment. Lower the batch
@@ -110,37 +189,82 @@ CREATE TABLE fd_many(
     tsdb.segmentby='device',
     tsdb.compress_algorithm='tags flat_dictionary'
 );
-
+NOTICE:  using column "time" as partitioning column
 INSERT INTO fd_many
 SELECT '2025-01-01'::timestamptz + (g || ' minutes')::interval,
        'dev' || (g % 3),
        'tag-' || (g % 7)
 FROM generate_series(0, 999) g;
-
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_many') ch;
+ count 
+-------
+     1
 
 -- Verify flat_dictionary is active in catalog
 SELECT relid::regclass, segmentby, orderby, algorithm
 FROM _timescaledb_catalog.compression_settings
 WHERE relid = 'fd_many'::regclass;
+  relid  | segmentby | orderby | algorithm 
+---------+-----------+---------+-----------
+ fd_many | {device}  | {time}  | {tags=8}
 
 -- Forward and reverse full scans must agree on the multiset of values and be
 -- exact reverses of each other on the orderby column.
 SELECT device, tags, count(*) FROM fd_many GROUP BY device, tags ORDER BY device, tags;
+ device | tags  | count 
+--------+-------+-------
+ dev0   | tag-0 |    48
+ dev0   | tag-1 |    47
+ dev0   | tag-2 |    48
+ dev0   | tag-3 |    48
+ dev0   | tag-4 |    47
+ dev0   | tag-5 |    48
+ dev0   | tag-6 |    48
+ dev1   | tag-0 |    48
+ dev1   | tag-1 |    48
+ dev1   | tag-2 |    47
+ dev1   | tag-3 |    48
+ dev1   | tag-4 |    48
+ dev1   | tag-5 |    47
+ dev1   | tag-6 |    47
+ dev2   | tag-0 |    47
+ dev2   | tag-1 |    48
+ dev2   | tag-2 |    48
+ dev2   | tag-3 |    47
+ dev2   | tag-4 |    48
+ dev2   | tag-5 |    48
+ dev2   | tag-6 |    47
 
 SELECT count(*) AS total,
        count(DISTINCT tags) AS distinct_tags,
        count(DISTINCT device) AS distinct_devices
 FROM fd_many;
+ total | distinct_tags | distinct_devices 
+-------+---------------+------------------
+  1000 |             7 |                3
 
 -- First and last few rows in each direction (values must be correct, not NULL
 -- or cross-segment garbage).
 SELECT time, device, tags FROM fd_many ORDER BY time ASC LIMIT 5;
+             time             | device | tags  
+------------------------------+--------+-------
+ Wed Jan 01 00:00:00 2025 UTC | dev0   | tag-0
+ Wed Jan 01 00:01:00 2025 UTC | dev1   | tag-1
+ Wed Jan 01 00:02:00 2025 UTC | dev2   | tag-2
+ Wed Jan 01 00:03:00 2025 UTC | dev0   | tag-3
+ Wed Jan 01 00:04:00 2025 UTC | dev1   | tag-4
+
 SELECT time, device, tags FROM fd_many ORDER BY time DESC LIMIT 5;
+             time             | device | tags  
+------------------------------+--------+-------
+ Wed Jan 01 16:39:00 2025 UTC | dev0   | tag-5
+ Wed Jan 01 16:38:00 2025 UTC | dev2   | tag-4
+ Wed Jan 01 16:37:00 2025 UTC | dev1   | tag-3
+ Wed Jan 01 16:36:00 2025 UTC | dev0   | tag-2
+ Wed Jan 01 16:35:00 2025 UTC | dev2   | tag-1
 
 DROP TABLE fd_metrics CASCADE;
 DROP TABLE fd_many CASCADE;
-
 RESET max_parallel_workers_per_gather;
 RESET enable_bitmapscan;
 RESET enable_seqscan;

@@ -94,18 +94,6 @@ compression_get_algorithm_name(CompressionAlgorithm alg)
 	return &compression_algorithm_name[alg];
 }
 
-static Compressor *
-compressor_for_type(Oid type)
-{
-	CompressionAlgorithm algorithm = compression_get_default_algorithm(type);
-	if (algorithm >= _END_COMPRESSION_ALGORITHMS)
-	{
-		elog(ERROR, "invalid compression algorithm %d", algorithm);
-	}
-
-	return definitions[algorithm].compressor_for_type(type);
-}
-
 /*
  * Look up the per-column compression algorithm override for a column.
  *

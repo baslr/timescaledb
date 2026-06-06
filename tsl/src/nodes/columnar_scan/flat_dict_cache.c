@@ -284,9 +284,8 @@ flat_dict_cache_lookup(FlatDictCache *cache, TupleTableSlot *compressed_slot)
 	uint32 key_len = flat_dict_cache_build_key(cache, compressed_slot, cache->scan_attnos);
 	cache->priv.probe_key_len = key_len;
 
-	bool found;
-	FlatDictCacheItem *item = flat_dict_ht_lookup(cache->ht, cache->keybuf, &found);
-	if (!found || item == NULL)
+	FlatDictCacheItem *item = flat_dict_ht_lookup(cache->ht, cache->keybuf);
+	if (item == NULL)
 		return NULL;
 	return item->ctx;
 }

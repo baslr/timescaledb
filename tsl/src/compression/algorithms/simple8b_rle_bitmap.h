@@ -208,7 +208,7 @@ simple8brle_bitmap_prefixsums(Simple8bRleSerialized *compressed)
 	return result;
 }
 
-static Simple8bRleBitmap
+static Simple8bRleBitmap pg_attribute_unused()
 simple8brle_bitmap_decompress(Simple8bRleSerialized *compressed)
 {
 	CheckCompressedData(compressed->num_elements <= GLOBAL_MAX_ROWS_PER_COMPRESSION);
