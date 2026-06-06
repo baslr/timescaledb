@@ -70,6 +70,13 @@ extern FlatDictionaryContext *flat_dict_cache_lookup(FlatDictCache *cache,
 													 TupleTableSlot *compressed_slot);
 
 /*
+ * Sentinel value returned by flat_dict_cache_lookup when the segment's
+ * dictionary column was NULL (the entire segment is all-NULL for that column).
+ * Callers must check for this before using the context for decompression.
+ */
+#define FLAT_DICT_CTX_ALL_NULL ((FlatDictionaryContext *) (uintptr_t) 1)
+
+/*
  * Insert (or replace) the dictionary for the segment identified by the given
  * compressed tuple's segmentby values. The key is serialized into the cache's
  * own memory context; ctx is stored as-is (it must already live in a

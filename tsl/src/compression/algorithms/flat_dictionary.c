@@ -665,22 +665,36 @@ ArrowArray *
 flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
                                FlatDictionaryContext *ctx, MemoryContext dest_mctx)
 {
-	if (ctx == NULL)
-		elog(ERROR, "flat_dictionary: no dictionary context provided for decompression");
-
 	const FlatDictionaryCompressed *header =
 		(const FlatDictionaryCompressed *) PG_DETOAST_DATUM(compressed_data);
 
 	Assert(header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY);
 
 	uint16 n = header->num_elements;
-	elog(DEBUG1, "flat_dictionary_decompress_all: num_elements=%u, index_width=%u, has_nulls=%u, "
-		 "num_values_in_ctx=%u, varsize=%zu",
-		 n, header->index_width, header->has_nulls, ctx->num_values,
-		 VARSIZE_ANY(header));
 	const char *index_data = (const char *) header + sizeof(FlatDictionaryCompressed);
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(dest_mctx);
+
+	/*
+	 * If ctx is NULL, this is an all-NULL segment (no dictionary exists).
+	 * Every row in the batch must be NULL. Produce an all-NULL ArrowArray.
+	 */
+	if (ctx == NULL)
+	{
+		ArrowArray *result = palloc0(sizeof(ArrowArray));
+		result->length = n;
+		result->null_count = n;
+		result->n_buffers = 3;
+		result->buffers = palloc0(sizeof(void *) * 3);
+		/* validity bitmap: all zeros = all NULL */
+		result->buffers[0] = palloc0(sizeof(uint64) * ((n + 63) / 64));
+		/* offsets: all zero (no data) */
+		result->buffers[1] = palloc0(pad_to_multiple(64, sizeof(uint32) * (n + 1)));
+		/* empty data buffer */
+		result->buffers[2] = palloc(64);
+		MemoryContextSwitchTo(old_ctx);
+		return result;
+	}
 
 	/*
 	 * For TEXT types, we build an ArrowArray with dictionary encoding:
@@ -706,15 +720,39 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 	if (typlen == -1)
 	{
 		/* Variable-length type (TEXT, BYTEA, etc.) */
-		/* Compute total data size */
+
+		/* Decode nulls bitmap upfront (needed for both size and data passes) */
+		bool has_nulls = header->has_nulls;
+		bool *null_flags = NULL;
+		if (has_nulls)
+		{
+			Size idx_data_size = (Size) n * header->index_width;
+			const char *nulls_data = index_data + idx_data_size;
+			StringInfoData si;
+			si.data = (char *) nulls_data;
+			si.len = VARSIZE(header) - sizeof(FlatDictionaryCompressed) - idx_data_size;
+			si.cursor = 0;
+			si.maxlen = si.len;
+			Simple8bRleSerialized *ns = bytes_deserialize_simple8b_and_advance(&si);
+			Simple8bRleDecompressionIterator nulls_iter;
+			simple8brle_decompression_iterator_init_forward(&nulls_iter, ns);
+			null_flags = palloc(sizeof(bool) * n);
+			for (uint16 i = 0; i < n; i++)
+			{
+				Simple8bRleDecompressResult nr =
+					simple8brle_decompression_iterator_try_next_forward(&nulls_iter);
+				null_flags[i] = (nr.val == 1);
+			}
+		}
+
+		/* Compute total data size (skip NULLs — their index slot is garbage) */
 		Size total_data_size = 0;
 		for (uint16 i = 0; i < n; i++)
 		{
+			if (null_flags && null_flags[i])
+				continue;
 			uint32 idx = flat_dict_read_index(index_data, header->index_width, i);
-			if (idx >= ctx->num_values)
-				elog(ERROR, "flat_dictionary decompress: index %u >= num_values %u "
-					 "(row %u of %u, index_width=%u, has_nulls=%u)",
-					 idx, ctx->num_values, i, n, header->index_width, header->has_nulls);
+			Assert(idx < ctx->num_values);
 			Datum val = ctx->values[idx];
 			total_data_size += VARSIZE_ANY_EXHDR(DatumGetPointer(val));
 		}
@@ -727,29 +765,11 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 		 */
 		uint32 *offsets =
 			(uint32 *) palloc(pad_to_multiple(64, sizeof(uint32) * (n + 1)));
-		char *data_buf = palloc(pad_to_multiple(64, total_data_size));
+		char *data_buf = palloc(pad_to_multiple(64, total_data_size + 1));
 		uint8 *validity = NULL;
 
-		/* Handle nulls */
-		bool has_nulls = header->has_nulls;
-		Simple8bRleDecompressionIterator nulls_iter;
 		if (has_nulls)
 		{
-			Size idx_data_size = (Size) n * header->index_width;
-			const char *nulls_data = index_data + idx_data_size;
-			StringInfoData si;
-			si.data = (char *) nulls_data;
-			si.len = VARSIZE(header) - sizeof(FlatDictionaryCompressed) - idx_data_size;
-			si.cursor = 0;
-			si.maxlen = si.len;
-			Simple8bRleSerialized *ns = bytes_deserialize_simple8b_and_advance(&si);
-			simple8brle_decompression_iterator_init_forward(&nulls_iter, ns);
-			/*
-			 * The validity bitmap is read by consumers a uint64 word at a time
-			 * (arrow_row_is_valid / the vectorized qual loop), so it must be
-			 * allocated as a whole number of 64-bit words — not (n+7)/8 bytes,
-			 * which would let the last word read past the allocation.
-			 */
 			validity = palloc0(sizeof(uint64) * ((n + 63) / 64));
 		}
 
@@ -757,13 +777,7 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 		offsets[0] = 0;
 		for (uint16 i = 0; i < n; i++)
 		{
-			bool is_null = false;
-			if (has_nulls)
-			{
-				Simple8bRleDecompressResult nr =
-					simple8brle_decompression_iterator_try_next_forward(&nulls_iter);
-				is_null = (nr.val == 1);
-			}
+			bool is_null = (null_flags && null_flags[i]);
 
 			if (is_null)
 			{
@@ -784,6 +798,9 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 					validity[i / 8] |= (1 << (i % 8));
 			}
 		}
+
+		if (null_flags)
+			pfree(null_flags);
 
 		result->buffers = palloc(sizeof(void *) * 3);
 		result->buffers[0] = validity;

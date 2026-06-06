@@ -1066,6 +1066,14 @@ compressed_batch_load_flat_dict(DecompressContext *dcontext, DecompressBatchStat
 			return;
 		}
 	}
+
+	/*
+	 * If we reach here, the dictionary row's flat_dict column was NULL (the
+	 * entire segment has NULL for that column — e.g. a metric that never has
+	 * tags). Insert the all-NULL sentinel so the cache knows this segment's
+	 * batches don't need dictionary decompression.
+	 */
+	flat_dict_cache_insert(dcontext->flat_dict_cache, compressed_slot, FLAT_DICT_CTX_ALL_NULL);
 }
 
 /*
@@ -1102,8 +1110,16 @@ compressed_batch_resolve_flat_dict(DecompressContext *dcontext,
 				 errmsg("flat_dictionary: no segment dictionary found for compressed batch")));
 	}
 
+	/*
+	 * The all-NULL sentinel means this segment's flat_dict column is entirely
+	 * NULL — no dictionary exists. Leave batch_state->flat_dict_ctx = NULL so
+	 * decompress_column will emit NULLs for every row.
+	 */
+	if (ctx == FLAT_DICT_CTX_ALL_NULL)
+		ctx = NULL;
+
 	elog(DEBUG1, "compressed_batch_resolve_flat_dict: ctx->num_values=%u, batch_rows=%u",
-		 ctx->num_values, batch_state->total_batch_rows);
+		 ctx ? ctx->num_values : 0, batch_state->total_batch_rows);
 
 	/* Sanity check: verify batch indexes fit within this dictionary */
 	for (int ci = 0; ci < dcontext->num_columns_with_metadata; ci++)

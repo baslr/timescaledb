@@ -250,6 +250,14 @@ flat_dict_cache_insert_at(FlatDictCache *cache, TupleTableSlot *slot, const Attr
 	uint32 key_len = flat_dict_cache_build_key(cache, slot, attnos);
 	cache->priv.probe_key_len = key_len;
 
+	elog(DEBUG2, "flat_dict_cache_insert: key_len=%u, first_bytes=%02x%02x%02x%02x, num_values=%u",
+		 key_len,
+		 key_len > 0 ? (unsigned char)cache->keybuf[0] : 0,
+		 key_len > 1 ? (unsigned char)cache->keybuf[1] : 0,
+		 key_len > 2 ? (unsigned char)cache->keybuf[2] : 0,
+		 key_len > 3 ? (unsigned char)cache->keybuf[3] : 0,
+		 ctx && ctx != FLAT_DICT_CTX_ALL_NULL ? ctx->num_values : 0);
+
 	/*
 	 * Copy the key bytes into the cache's own context: keybuf is scratch and
 	 * gets overwritten by the next build. Insert with the persistent copy as
@@ -283,6 +291,13 @@ flat_dict_cache_lookup(FlatDictCache *cache, TupleTableSlot *compressed_slot)
 {
 	uint32 key_len = flat_dict_cache_build_key(cache, compressed_slot, cache->scan_attnos);
 	cache->priv.probe_key_len = key_len;
+
+	elog(DEBUG2, "flat_dict_cache_lookup: key_len=%u, first_bytes=%02x%02x%02x%02x",
+		 key_len,
+		 key_len > 0 ? (unsigned char)cache->keybuf[0] : 0,
+		 key_len > 1 ? (unsigned char)cache->keybuf[1] : 0,
+		 key_len > 2 ? (unsigned char)cache->keybuf[2] : 0,
+		 key_len > 3 ? (unsigned char)cache->keybuf[3] : 0);
 
 	FlatDictCacheItem *item = flat_dict_ht_lookup(cache->ht, cache->keybuf);
 	if (item == NULL)
