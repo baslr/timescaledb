@@ -1102,6 +1102,30 @@ compressed_batch_resolve_flat_dict(DecompressContext *dcontext,
 				 errmsg("flat_dictionary: no segment dictionary found for compressed batch")));
 	}
 
+	elog(DEBUG1, "compressed_batch_resolve_flat_dict: ctx->num_values=%u, batch_rows=%u",
+		 ctx->num_values, batch_state->total_batch_rows);
+
+	/* Sanity check: verify batch indexes fit within this dictionary */
+	for (int ci = 0; ci < dcontext->num_columns_with_metadata; ci++)
+	{
+		CompressionColumnDescription *cd = &dcontext->compressed_chunk_columns[ci];
+		if (cd->type != COMPRESSED_COLUMN)
+			continue;
+		bool isnull;
+		Datum val = slot_getattr(compressed_slot, cd->compressed_scan_attno, &isnull);
+		if (isnull)
+			continue;
+		CompressedDataHeader *h = (CompressedDataHeader *) DatumGetPointer(val);
+		if (h->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+		{
+			const FlatDictionaryCompressed *fh = (const FlatDictionaryCompressed *) h;
+			if (fh->num_elements > 0 && fh->num_elements != batch_state->total_batch_rows)
+				elog(WARNING, "MISMATCH: header->num_elements=%u but batch_rows=%u! "
+					 "This means the compressed datum is NOT for this batch.",
+					 fh->num_elements, batch_state->total_batch_rows);
+		}
+	}
+
 	batch_state->flat_dict_ctx = ctx;
 }
 

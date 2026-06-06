@@ -1,6 +1,6 @@
 # TimescaleDB Build & Setup Guide (Debian/Ubuntu, PostgreSQL 17)
 
-## 1. Voraussetzungen installieren
+## 1. Install Prerequisites
 
 ```bash
 sudo apt-get update
@@ -13,16 +13,16 @@ sudo apt-get install -y \
   tzdata-legacy
 ```
 
-**Pakete im Detail:**
+**Packages explained:**
 
-| Paket | Wozu |
-|-------|------|
-| `postgresql-17` | Server (inkl. `initdb`, `pg_regress`) |
-| `postgresql-server-dev-17` | Header + `pg_config` zum Kompilieren |
-| `libicu-dev` | Unicode-Header (`unicode/ucol.h`) für VectorAgg |
-| `tzdata-legacy` | Legacy-Timezone-Links (`US/Pacific` etc.) für Tests |
+| Package | Purpose |
+|---------|---------|
+| `postgresql-17` | Server (includes `initdb`, `pg_regress`) |
+| `postgresql-server-dev-17` | Headers + `pg_config` for compilation |
+| `libicu-dev` | Unicode headers (`unicode/ucol.h`) for VectorAgg |
+| `tzdata-legacy` | Legacy timezone links (`US/Pacific` etc.) for tests |
 
-## 2. Repository klonen / Branch auschecken
+## 2. Clone Repository / Checkout Branch
 
 ```bash
 git clone https://github.com/baslr/timescaledb.git
@@ -30,64 +30,63 @@ cd timescaledb
 git checkout flat_dictionary
 ```
 
-## 3. Build (Debug mit Assertions)
+## 3. Build (Debug with Assertions)
 
 ```bash
-# Einmalig: Build-Verzeichnis erzeugen
+# One-time: create build directory
 ./bootstrap -DCMAKE_BUILD_TYPE=Debug -DASSERTIONS=ON
 
-# Kompilieren
+# Compile
 cd build
 make -j"$(nproc)"
 
-# Installieren (in die PG-Verzeichnisse)
+# Install (into PG directories)
 sudo make install
 ```
 
-**Falls CMake die Quellliste nicht erkennt** (z.B. nach neuen `.c`-Dateien):
+**If CMake doesn't pick up new source files** (e.g. after adding `.c` files):
 ```bash
 cd build && cmake . && make -j"$(nproc)"
 ```
 
-## 4. PostgreSQL konfigurieren
+## 4. Configure PostgreSQL
 
-TimescaleDB muss als Shared Library vorgeladen werden, **bevor** die Extension
-erstellt werden kann. Ohne diesen Schritt schlägt `CREATE EXTENSION` mit
-`must be preloaded` fehl.
+TimescaleDB must be preloaded as a shared library **before** the extension can be
+created. Without this step, `CREATE EXTENSION` fails with `must be preloaded`.
 
 ```bash
-# Konfiguration ergänzen
+# Add to config
 echo "shared_preload_libraries = 'timescaledb'" | sudo tee -a /etc/postgresql/17/main/postgresql.conf
 
-# PostgreSQL (neu)starten — nötig, damit die Library geladen wird
+# Restart PostgreSQL — required for the library to load
 sudo pg_ctlcluster 17 main restart
 ```
 
-## 5. Extension in einer Datenbank aktivieren
+## 5. Activate Extension in a Database
 
-Die Extension muss **pro Datenbank** einmalig erstellt werden:
+The extension must be created **once per database**:
 
 ```bash
 sudo -u postgres psql -c "CREATE EXTENSION IF NOT EXISTS timescaledb;"
 ```
 
-Damit werden die TimescaleDB-Funktionen, der `tsdb.*`-Namespace für
-`CREATE TABLE ... WITH (tsdb.hypertable, ...)` und die internen Katalog-Tabellen
-(z.B. `_timescaledb_catalog.compression_settings`) angelegt.
+This registers the TimescaleDB functions, the `tsdb.*` namespace for
+`CREATE TABLE ... WITH (tsdb.hypertable, ...)`, and the internal catalog tables
+(e.g. `_timescaledb_catalog.compression_settings`).
 
-Prüfen:
+Verify:
 ```bash
 sudo -u postgres psql -c "SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';"
 ```
 
-Erwartete Ausgabe:
+Expected output:
 ```
  extversion
 ------------
  2.27.2
 ```
 
-## 6. Testen, ob flat_dictionary funktioniert
+## 6. Verify flat_dictionary Works
 
 ```bash
 sudo -u postgres psql <<'SQL'
@@ -102,7 +101,7 @@ CREATE TABLE test_fd(
     tsdb.compress_algorithm='tags flat_dictionary'
 );
 
--- Prüfen: algorithm muss {tags=8} zeigen
+-- Verify: algorithm must show {tags=8}
 SELECT relid::regclass, segmentby, orderby, algorithm
 FROM _timescaledb_catalog.compression_settings
 WHERE relid = 'test_fd'::regclass;
@@ -111,78 +110,78 @@ DROP TABLE test_fd CASCADE;
 SQL
 ```
 
-Erwartete Ausgabe:
+Expected output:
 ```
   relid  | segmentby | orderby | algorithm
 ---------+-----------+---------+-----------
  test_fd | {device}  | {time}  | {tags=8}
 ```
 
-## 7. Tests ausführen
+## 7. Run Tests
 
-Aus dem Repo-Root:
+From the repo root:
 
 ```bash
 cd build
 
-# Einzelner Test (temporäre PG-Instanz):
+# Single test (temporary PG instance):
 TESTS=compress_flat_dict_pushdown make installcheck-t
 
-# Regressionssuite:
+# Regression suite:
 TESTS="compress_flat_dict_pushdown compress_unordered_sort compress_sort_transform \
        compression compression_sorted_merge transparent_decompression" \
   make installcheck-t
 ```
 
-**Hinweis:** `installcheck-t` startet eine eigene temporäre PG-Instanz auf Port 55432. Falls du gegen die laufende lokale Instanz testen willst, nutze `installchecklocal-t` (braucht dann passwortlose `psql`-Verbindung als aktueller User).
+**Note:** `installcheck-t` starts its own temporary PG instance on port 55432. To test against the running local instance, use `installchecklocal-t` (requires passwordless `psql` connection as current user).
 
-## 8. Nach Code-Änderungen: Rebuild-Zyklus
+## 8. After Code Changes: Rebuild Cycle
 
 ```bash
 cd build
-make -j"$(nproc)"          # inkrementell kompilieren
-sudo make install          # in PG installieren
-sudo pg_ctlcluster 17 main restart   # Extension neu laden
+make -j"$(nproc)"          # incremental compile
+sudo make install          # install into PG
+sudo pg_ctlcluster 17 main restart   # reload extension
 ```
 
-Für reine Test-Änderungen (nur `.sql`/`.out`) reicht:
+For test-only changes (`.sql`/`.out` files):
 ```bash
 TESTS=compress_flat_dict_pushdown make installcheck-t
 ```
 
 ## Troubleshooting
 
-| Problem | Lösung |
-|---------|--------|
+| Problem | Solution |
+|---------|----------|
 | `pg_config: not found` | `sudo apt install postgresql-server-dev-17` |
 | `unicode/ucol.h: No such file` | `sudo apt install libicu-dev` |
 | `initdb: not found` | `sudo apt install postgresql-17` |
 | `TimeZone "US/Pacific" invalid` | `sudo apt install tzdata-legacy` |
-| `shared_preload_libraries` Fehler | Pfad in `postgresql.conf` prüfen, dann `sudo pg_ctlcluster 17 main restart` |
-| `-Werror` bei unbenutzten Funktionen | `pg_attribute_unused()` an die Funktion, oder entfernen |
+| `shared_preload_libraries` error | Check path in `postgresql.conf`, then `sudo pg_ctlcluster 17 main restart` |
+| `-Werror` on unused functions | Add `pg_attribute_unused()` to the function, or remove it |
 
 ---
 
 ## Alternative: Container (Podman/Docker)
 
-Statt lokal zu installieren, kann alles in einem Container laufen. Das Repo
-enthält ein Multi-Stage `Dockerfile` + `compose.yaml`.
+Instead of installing locally, everything can run in a container. The repo
+contains a multi-stage `Dockerfile` + `compose.yaml`.
 
-### Starten
+### Start
 
 ```bash
 cd timescaledb
 podman compose up -d
 ```
 
-Beim ersten Mal wird das Image gebaut (kompiliert TimescaleDB im Container).
-Danach startet es in Sekunden.
+First time builds the image (compiles TimescaleDB inside the container).
+After that it starts in seconds.
 
-### Verbinden
+### Connect
 
 ```bash
-psql -h localhost -p 5444 -U postgres -d tsdb
-# Passwort: postgres
+psql -h localhost -p 5444 -U postgres -d postgres
+# Password: postgres
 ```
 
 ### Status / Logs
@@ -192,41 +191,67 @@ podman compose ps
 podman compose logs -f timescaledb-dev
 ```
 
-### Stoppen / Entfernen
+### Stop / Remove
 
 ```bash
-# Stoppen (Daten bleiben im Volume):
+# Stop (data persists in volume):
 podman compose down
 
-# Stoppen + Volume löschen (alles weg):
+# Stop + delete volume (everything gone):
 podman compose down -v
 ```
 
-### Neu bauen nach Code-Änderungen
+### Rebuild After Code Changes
+
+**Important:** You must use `--no-cache` to force a full rebuild. Without it,
+Podman reuses cached layers and your code changes won't be included in the image.
 
 ```bash
+podman compose down -v
+podman rmi localhost/timescaledb_timescaledb-dev:latest
 podman compose build --no-cache
 podman compose up -d
 ```
 
-Oder in einem Schritt:
+Or in one step:
 ```bash
 podman compose up -d --build
 ```
 
-### Konfiguration (compose.yaml)
+### Configuration (compose.yaml)
 
-| Variable | Default | Beschreibung |
+| Variable | Default | Description |
 |----------|---------|-------------|
-| `POSTGRES_USER` | `postgres` | Superuser-Name |
-| `POSTGRES_PASSWORD` | `postgres` | Passwort |
-| `POSTGRES_DB` | `tsdb` | Datenbank (wird beim ersten Start angelegt) |
-| Port | `5444` | Host-Port (intern 5432) |
+| `POSTGRES_USER` | `postgres` | Superuser name |
+| `POSTGRES_PASSWORD` | `postgres` | Password |
+| `POSTGRES_DB` | `postgres` | Database (created on first start) |
+| Port | `5444` | Host port (internal 5432) |
 
-### Wie es funktioniert
+### How It Works
 
-1. **Builder-Stage**: Basiert auf `postgres:17-bookworm`, installiert Build-Tools,
-   kompiliert TimescaleDB, legt Artefakte in `/install/` ab
-2. **Runtime-Stage**: Frisches `postgres:17-bookworm`, kopiert nur die fertigen
-   `.so` + `.sql` + `.control`-Dateien, konfiguriert `shared_preload_libraries`,
-   erstellt die Extension automatisch beim ersten Start
+1. **Builder stage**: Based on `postgres:17-bookworm`, installs build tools,
+   compiles TimescaleDB, places artifacts in `/install/`
+2. **Runtime stage**: Fresh `postgres:17-bookworm`, copies only the compiled
+   `.so` + `.sql` + `.control` files, configures `shared_preload_libraries`,
+   creates the extension automatically on first start
+
+### .pgpass for Passwordless Connections
+
+So `psql` doesn't prompt for a password every time:
+
+```bash
+# ~/.pgpass — one line per instance
+# Format: hostname:port:database:username:password
+cat >> ~/.pgpass << 'EOF'
+localhost:5432:*:postgres:your_prod_password
+localhost:5444:*:postgres:postgres
+EOF
+chmod 600 ~/.pgpass
+```
+
+---
+
+## Further Reading
+
+- **[USAGE-flat-dictionary.md](USAGE-flat-dictionary.md)** — Create tables with flat_dictionary, compression policy, stream data
+- **[HOST-SESSION-flat-dict-cache.md](HOST-SESSION-flat-dict-cache.md)** — Technical details on the cache code and test workflow

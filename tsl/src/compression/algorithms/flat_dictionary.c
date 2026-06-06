@@ -427,6 +427,18 @@ flat_dict_compressor_finish(Compressor *compressor)
 			ext->internal->index_width = FLAT_DICT_WIDTH_32;
 	}
 
+	/* Validate: no index should exceed the dictionary cardinality */
+	if (num_values > 0)
+	{
+		for (uint32 i = 0; i < ext->internal->num_elements; i++)
+		{
+			if (ext->internal->indexes[i] >= num_values)
+				elog(ERROR, "flat_dict_compressor_finish: index[%u]=%u >= num_values=%u (total_elements=%u, width=%u)",
+					 i, ext->internal->indexes[i], num_values,
+					 ext->internal->num_elements, ext->internal->index_width);
+		}
+	}
+
 	void *result = flat_dictionary_batch_finish(ext->internal);
 	pfree(ext->internal->indexes);
 	pfree(ext->internal->nulls);
@@ -662,6 +674,10 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 	Assert(header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY);
 
 	uint16 n = header->num_elements;
+	elog(DEBUG1, "flat_dictionary_decompress_all: num_elements=%u, index_width=%u, has_nulls=%u, "
+		 "num_values_in_ctx=%u, varsize=%zu",
+		 n, header->index_width, header->has_nulls, ctx->num_values,
+		 VARSIZE_ANY(header));
 	const char *index_data = (const char *) header + sizeof(FlatDictionaryCompressed);
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(dest_mctx);

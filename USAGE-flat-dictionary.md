@@ -59,13 +59,31 @@ Erwartete Ausgabe:
 SELECT add_compression_policy('server_metrics_v2', INTERVAL '1 hour');
 ```
 
-Optional: Job-Intervall anpassen (Default 12h → z.B. 30min):
+Optional: Job-Intervall anpassen (Default 1 day → z.B. 1 hour):
 
 ```sql
-SELECT alter_job(job_id, schedule_interval => INTERVAL '30 minutes')
+SELECT alter_job(job_id, schedule_interval => INTERVAL '1 hour')
 FROM timescaledb_information.jobs
 WHERE proc_name = 'policy_compression'
   AND hypertable_name = 'server_metrics_v2';
+```
+
+Den Job sofort auslösen (statt auf das nächste Intervall zu warten):
+
+```sql
+SELECT alter_job(job_id, next_start => now())
+FROM timescaledb_information.jobs
+WHERE proc_name = 'policy_compression'
+  AND hypertable_name = 'server_metrics_v2';
+```
+
+Komprimierungsstatus prüfen:
+
+```sql
+SELECT chunk_name, range_start, is_compressed
+FROM timescaledb_information.chunks
+WHERE hypertable_name = 'server_metrics_v2'
+ORDER BY range_start;
 ```
 
 ## Retention Policy (optional)

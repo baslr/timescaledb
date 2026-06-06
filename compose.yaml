@@ -9,7 +9,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: tsdb
+      POSTGRES_DB: postgres
     volumes:
       - tsdb_data:/var/lib/postgresql/data
     healthcheck:
