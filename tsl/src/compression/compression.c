@@ -1968,6 +1968,14 @@ row_compressor_close(RowCompressor *row_compressor)
 static void
 flat_dict_pass1_feed_row(RowCompressor *row_compressor, TupleTableSlot *slot)
 {
+	/*
+	 * Switch to row_compressor_context so that the dictionary hash keys
+	 * (allocated via datumCopy inside flat_dictionary_builder_add) survive
+	 * MemoryContextReset(per_row_ctx) that happens during batch flushes in
+	 * Pass 2 replay. Without this, the hash table has dangling key pointers
+	 * after the first batch flush and crashes on the next lookup.
+	 */
+	MemoryContext old = MemoryContextSwitchTo(row_compressor->row_compressor_context);
 	for (int i = 0; i < row_compressor->num_flat_dict_columns; i++)
 	{
 		int col = row_compressor->flat_dict_col_indexes[i];
@@ -1979,6 +1987,7 @@ flat_dict_pass1_feed_row(RowCompressor *row_compressor, TupleTableSlot *slot)
 			flat_dictionary_builder_add(builder, val);
 		}
 	}
+	MemoryContextSwitchTo(old);
 }
 
 /*
@@ -2059,8 +2068,13 @@ flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer)
 	 * The modified row_compressor_append_row will call builder_add() which
 	 * returns the existing index (lookup) for each value.
 	 * The compressor's finish() reads cardinality from the builder back-pointer.
+	 *
+	 * Allocate replay_slot in row_compressor_context so it survives
+	 * MemoryContextReset(per_row_ctx) during batch flushes.
 	 */
+	MemoryContext old_replay_ctx = MemoryContextSwitchTo(row_compressor->row_compressor_context);
 	TupleTableSlot *replay_slot = MakeTupleTableSlot(row_compressor->in_desc, &TTSOpsMinimalTuple);
+	MemoryContextSwitchTo(old_replay_ctx);
 	tuplestore_rescan(row_compressor->flat_dict_tuplestore);
 
 	while (tuplestore_gettupleslot(row_compressor->flat_dict_tuplestore,
@@ -2101,7 +2115,11 @@ flat_dict_reset_builders(RowCompressor *row_compressor)
 	tuplestore_clear(row_compressor->flat_dict_tuplestore);
 	row_compressor->flat_dict_buffered_rows = 0;
 
-	/* Reallocate builders for next segment */
+	/*
+	 * Reallocate builders in row_compressor_context so they survive
+	 * MemoryContextReset(per_row_ctx) during subsequent batch flushes.
+	 */
+	MemoryContext old = MemoryContextSwitchTo(row_compressor->row_compressor_context);
 	for (int i = 0; i < row_compressor->num_flat_dict_columns; i++)
 	{
 		int col = row_compressor->flat_dict_col_indexes[i];
@@ -2117,6 +2135,7 @@ flat_dict_reset_builders(RowCompressor *row_compressor)
 				row_compressor->flat_dict_builders[col]);
 		}
 	}
+	MemoryContextSwitchTo(old);
 }
 
 /*

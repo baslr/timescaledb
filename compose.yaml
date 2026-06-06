@@ -1,0 +1,23 @@
+services:
+  timescaledb-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: timescaledb-dev
+    ports:
+      - "5444:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: tsdb
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  tsdb_data:

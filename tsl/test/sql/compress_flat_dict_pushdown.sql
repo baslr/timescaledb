@@ -138,6 +138,39 @@ FROM fd_many;
 SELECT time, device, tags FROM fd_many ORDER BY time ASC LIMIT 5;
 SELECT time, device, tags FROM fd_many ORDER BY time DESC LIMIT 5;
 
+--------------------------------------------------------------------------------
+-- Regression test: compression must not crash with > 1000 rows per segment.
+-- This triggers a batch flush during Pass 2 replay of the flat_dict two-pass
+-- compression. Before the fix, the batch flush would reset per_row_ctx and free
+-- the dictionary hash keys, causing a use-after-free crash on the next lookup.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_large_segment(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+-- 2000 rows in a single segment (device = 'dev0') — well above batch size (1000)
+INSERT INTO fd_large_segment
+SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
+       'dev0',
+       'tag-' || (g % 5)
+FROM generate_series(1, 2000) g;
+
+-- This must not crash:
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_large_segment') ch;
+
+-- Verify data survives round-trip
+SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
+
+DROP TABLE fd_large_segment CASCADE;
 DROP TABLE fd_metrics CASCADE;
 DROP TABLE fd_many CASCADE;
 
