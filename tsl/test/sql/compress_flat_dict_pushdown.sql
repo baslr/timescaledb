@@ -171,6 +171,203 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('fd_large_segment') ch;
 SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
 
 DROP TABLE fd_large_segment CASCADE;
+
+--------------------------------------------------------------------------------
+-- Edge case: NULL values in flat_dictionary column
+-- NULLs must be preserved through compression/decompression round-trip.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_nulls(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+INSERT INTO fd_nulls VALUES
+('2025-01-01 00:00', 'dev0', 'tag-a'),
+('2025-01-01 01:00', 'dev0', NULL),
+('2025-01-01 02:00', 'dev0', 'tag-b'),
+('2025-01-01 03:00', 'dev0', NULL),
+('2025-01-01 04:00', 'dev0', 'tag-a'),
+('2025-01-01 00:00', 'dev1', NULL),
+('2025-01-01 01:00', 'dev1', 'tag-x'),
+('2025-01-01 02:00', 'dev1', NULL);
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_nulls') ch;
+
+-- NULLs must appear in correct positions
+SELECT time, device, tags FROM fd_nulls ORDER BY device, time;
+
+-- Aggregate must count NULLs correctly
+SELECT device, count(*) AS total, count(tags) AS non_null, count(*) - count(tags) AS nulls
+FROM fd_nulls GROUP BY device ORDER BY device;
+
+DROP TABLE fd_nulls CASCADE;
+
+--------------------------------------------------------------------------------
+-- Edge case: single-row segments
+-- Each segment has exactly 1 row — tests minimal dictionary (1 entry).
+--------------------------------------------------------------------------------
+CREATE TABLE fd_single_row(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+INSERT INTO fd_single_row VALUES
+('2025-01-01 00:00', 'a', 'only-tag'),
+('2025-01-01 00:00', 'b', 'other-tag'),
+('2025-01-01 00:00', 'c', 'third-tag');
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_single_row') ch;
+
+SELECT device, tags FROM fd_single_row ORDER BY device;
+
+DROP TABLE fd_single_row CASCADE;
+
+--------------------------------------------------------------------------------
+-- Edge case: many distinct values (>255) forces 16-bit index width
+-- Verifies the index_width upgrade path in flat_dict_compressor_finish.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_wide_dict(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+-- 500 rows with 300 distinct tags in one segment → forces 16-bit index
+INSERT INTO fd_wide_dict
+SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
+       'dev0',
+       'tag-' || (g % 300)
+FROM generate_series(1, 500) g;
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_wide_dict') ch;
+
+-- Verify round-trip: count distinct must match
+SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_wide_dict;
+
+-- Spot check some values
+SELECT time, tags FROM fd_wide_dict ORDER BY time LIMIT 3;
+SELECT time, tags FROM fd_wide_dict ORDER BY time DESC LIMIT 3;
+
+DROP TABLE fd_wide_dict CASCADE;
+
+--------------------------------------------------------------------------------
+-- Edge case: all rows have the same tag value (dictionary cardinality = 1)
+-- Tests that a degenerate dictionary (single entry) works correctly.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_uniform(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+INSERT INTO fd_uniform
+SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
+       'dev0',
+       'always-same'
+FROM generate_series(1, 100) g;
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_uniform') ch;
+
+SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_uniform;
+
+DROP TABLE fd_uniform CASCADE;
+
+--------------------------------------------------------------------------------
+-- Edge case: empty segment (device with no rows after filter)
+-- Tests that compression handles segments gracefully when no data matches.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_empty_seg(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+-- Only one device has data
+INSERT INTO fd_empty_seg
+SELECT '2025-01-01'::timestamptz + (g || ' minutes')::interval,
+       'dev0',
+       'tag-' || (g % 3)
+FROM generate_series(1, 50) g;
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_empty_seg') ch;
+
+SELECT count(*) AS total FROM fd_empty_seg;
+
+DROP TABLE fd_empty_seg CASCADE;
+
+--------------------------------------------------------------------------------
+-- Stress test: many segments with batch flushes in each
+-- 5 devices × 1500 rows each = 7500 total, each segment > batch size (1000)
+-- Tests the full Pass1→Flush→Pass2→Reset→next-segment cycle multiple times.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_stress(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+INSERT INTO fd_stress
+SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
+       'dev' || (g % 5),
+       'tag-' || (g % 10)
+FROM generate_series(1, 7500) g;
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_stress') ch;
+
+-- Verify all data intact after round-trip
+SELECT device, count(*) AS rows, count(DISTINCT tags) AS distinct_tags
+FROM fd_stress GROUP BY device ORDER BY device;
+
+-- Verify ordering preserved
+SELECT time, device, tags FROM fd_stress ORDER BY time ASC LIMIT 3;
+SELECT time, device, tags FROM fd_stress ORDER BY time DESC LIMIT 3;
+
+DROP TABLE fd_stress CASCADE;
+
 DROP TABLE fd_metrics CASCADE;
 DROP TABLE fd_many CASCADE;
 
