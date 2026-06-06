@@ -331,6 +331,9 @@ typedef struct RowCompressor
 	/* Tuplestore buffering rows during Pass 1 */
 	struct Tuplestorestate *flat_dict_tuplestore;
 	int64 flat_dict_buffered_rows;
+	/* True during Pass 2 replay — suppresses MemoryContextReset(per_row_ctx)
+	 * in clear_batch because the replay slot data lives in per_row_ctx */
+	bool in_flat_dict_replay;
 } RowCompressor;
 
 /*

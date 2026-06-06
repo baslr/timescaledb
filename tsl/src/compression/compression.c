@@ -1438,11 +1438,13 @@ row_compressor_init(RowCompressor *row_compressor, const CompressionSettings *se
 		row_compressor->flat_dict_tuplestore =
 			tuplestore_begin_heap(false, false, work_mem);
 		row_compressor->flat_dict_buffered_rows = 0;
+		row_compressor->in_flat_dict_replay = false;
 	}
 	else
 	{
 		row_compressor->flat_dict_tuplestore = NULL;
 		row_compressor->flat_dict_buffered_rows = 0;
+		row_compressor->in_flat_dict_replay = false;
 	}
 
 	MemoryContextSwitchTo(old_context);
@@ -1849,7 +1851,16 @@ row_compressor_clear_batch(RowCompressor *row_compressor, bool changed_groups)
 	row_compressor->rows_compressed_into_current_value = 0;
 
 	MemoryContextSwitchTo(old_cxt);
-	MemoryContextReset(row_compressor->per_row_ctx);
+
+	/*
+	 * During flat_dict Pass 2 replay, the replay slot's tuple data lives in
+	 * per_row_ctx. Resetting it would free that data while subsequent rows
+	 * still reference it (the slot is reused across iterations). Defer the
+	 * reset — flat_dict_finalize_segment will reset per_row_ctx once the
+	 * entire replay is done.
+	 */
+	if (!row_compressor->in_flat_dict_replay)
+		MemoryContextReset(row_compressor->per_row_ctx);
 }
 
 static void
@@ -2077,6 +2088,14 @@ flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer)
 	MemoryContextSwitchTo(old_replay_ctx);
 	tuplestore_rescan(row_compressor->flat_dict_tuplestore);
 
+	/*
+	 * Suppress per_row_ctx resets during replay. The tuplestore materializes
+	 * slot data into per_row_ctx, and row_compressor_append_row /
+	 * flat_dictionary_builder_add both read from that data after a batch
+	 * flush. Without this flag, clear_batch would free the data mid-replay.
+	 */
+	row_compressor->in_flat_dict_replay = true;
+
 	while (tuplestore_gettupleslot(row_compressor->flat_dict_tuplestore,
 								   true, false, replay_slot))
 	{
@@ -2098,6 +2117,11 @@ flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer)
 	{
 		row_compressor_flush(row_compressor, writer, true);
 	}
+
+	row_compressor->in_flat_dict_replay = false;
+
+	/* Now safe to reset per_row_ctx — replay is complete */
+	MemoryContextReset(row_compressor->per_row_ctx);
 
 	ExecDropSingleTupleTableSlot(replay_slot);
 
