@@ -267,6 +267,19 @@ batch_queue_heap_push_batch(BatchQueue *_queue, DecompressContext *dcontext,
 	DecompressBatchState *batch_state = batch_array_get_at(batch_array, new_batch_index);
 
 	compressed_batch_set_compressed_tuple(dcontext, batch_state, compressed_slot);
+
+	/*
+	 * Dictionary rows (flat_dictionary, _ts_meta_count == 0) are loaded into
+	 * the per-segment cache by compressed_batch_set_compressed_tuple and have
+	 * total_batch_rows == 0.  They carry no data rows, so skip them here —
+	 * they must not enter the merge heap.
+	 */
+	if (batch_state->total_batch_rows == 0)
+	{
+		batch_array_clear_at(batch_array, new_batch_index);
+		return;
+	}
+
 	compressed_batch_save_first_tuple(dcontext, batch_state, queue->last_batch_first_tuple_slot);
 
 	/*

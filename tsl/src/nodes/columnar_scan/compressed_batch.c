@@ -1118,9 +1118,6 @@ compressed_batch_resolve_flat_dict(DecompressContext *dcontext,
 	if (ctx == FLAT_DICT_CTX_ALL_NULL)
 		ctx = NULL;
 
-	elog(DEBUG1, "compressed_batch_resolve_flat_dict: ctx->num_values=%u, batch_rows=%u",
-		 ctx ? ctx->num_values : 0, batch_state->total_batch_rows);
-
 	/* Sanity check: verify batch indexes fit within this dictionary */
 	for (int ci = 0; ci < dcontext->num_columns_with_metadata; ci++)
 	{

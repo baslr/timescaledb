@@ -7,6 +7,7 @@
 -- per-segment cache these were disabled by a planner guard and an explicit
 -- Sort was added above a forward ColumnarScan.
 SET timezone TO 'UTC';
+SET
 \set PREFIX 'EXPLAIN (buffers off, costs off, timing off, summary off)'
 CREATE TABLE fd_metrics(
     time timestamptz NOT NULL,
@@ -19,7 +20,9 @@ CREATE TABLE fd_metrics(
     tsdb.segmentby='device',
     tsdb.compress_algorithm='tags flat_dictionary'
 );
-NOTICE:  using column "time" as partitioning column
+psql:/tmp/fd_test_full.sql:25: NOTICE:  using column "time" as partitioning column
+HINT:  Use "timescaledb.partition_column" to specify a different column to use as partitioning column.
+CREATE TABLE
 -- Two segments (device d1, d2). Multiple distinct tag values per segment so the
 -- flat_dictionary actually builds a non-trivial dictionary per segment, and the
 -- two segments get DIFFERENT dictionaries (d1: a/b/c, d2: x/y/z) to catch any
@@ -37,10 +40,15 @@ INSERT INTO fd_metrics VALUES
 ('2025-01-01 03:00:00', 'd2', 'tag-x', 31.0),
 ('2025-01-01 04:00:00', 'd2', 'tag-y', 41.0),
 ('2025-01-01 05:00:00', 'd2', 'tag-z', 36.0);
+INSERT 0 12
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_metrics') ch;
+psql:/tmp/fd_test_full.sql:45: WARNING:  poor compression ratio detected for chunk "_hyper_240_343_chunk"'
+DETAIL:  Chunk "_hyper_240_343_chunk" has a poor compression ratio: 0.80. Size before compression: 32768 bytes. Size after compression: 40960 bytes
+HINT:  Changing compression settings for "fd_metrics" can improve compression rate
  count 
 -------
      1
+(1 row)
 
 -- Verify flat_dictionary is active in catalog
 SELECT relid::regclass, segmentby, orderby, algorithm
@@ -49,31 +57,39 @@ WHERE relid = 'fd_metrics'::regclass;
    relid    | segmentby | orderby | algorithm 
 ------------+-----------+---------+-----------
  fd_metrics | {device}  | {time}  | {tags=8}
+(1 row)
 
 SET max_parallel_workers_per_gather = 0;
+SET
 SET enable_bitmapscan = 0;
+SET
 SET enable_seqscan = 0;
+SET
 SET timescaledb.enable_vectorized_aggregation = off;
+SET
 --------------------------------------------------------------------------------
 -- test_flat_dict_order_by_pushdown:
 -- ORDER BY time within a segment should be answered by a compressed sort
 -- pushdown / batch sorted merge, NOT a separate Sort node above ColumnarScan.
 --------------------------------------------------------------------------------
 :PREFIX SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time;
---- QUERY PLAN ---
- Custom Scan (ColumnarScan) on _hyper_1_1_chunk
-   ->  Index Scan Backward using compress_hyper_2_2_chunk_device__ts_meta_min_1__ts_meta_max_idx on compress_hyper_2_2_chunk
+                                                           QUERY PLAN                                                            
+---------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (ColumnarScan) on _hyper_240_343_chunk
+   ->  Index Scan Backward using compress_hyper_241_344_chunk_device__ts_meta_min_1__ts_meta_idx on compress_hyper_241_344_chunk
          Index Cond: (device = 'd1'::text)
+(3 rows)
 
 SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time;
-             time             | tags  
-------------------------------+-------
- Wed Jan 01 00:00:00 2025 UTC | tag-a
- Wed Jan 01 01:00:00 2025 UTC | tag-b
- Wed Jan 01 02:00:00 2025 UTC | tag-c
- Wed Jan 01 03:00:00 2025 UTC | tag-a
- Wed Jan 01 04:00:00 2025 UTC | tag-b
- Wed Jan 01 05:00:00 2025 UTC | tag-c
+          time          | tags  
+------------------------+-------
+ 2025-01-01 00:00:00+00 | tag-a
+ 2025-01-01 01:00:00+00 | tag-b
+ 2025-01-01 02:00:00+00 | tag-c
+ 2025-01-01 03:00:00+00 | tag-a
+ 2025-01-01 04:00:00+00 | tag-b
+ 2025-01-01 05:00:00+00 | tag-c
+(6 rows)
 
 --------------------------------------------------------------------------------
 -- test_flat_dict_reverse_scan:
@@ -81,20 +97,23 @@ SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time;
 -- pushdown. The flat_dictionary values must come out correct in reverse order.
 --------------------------------------------------------------------------------
 :PREFIX SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time DESC;
---- QUERY PLAN ---
- Custom Scan (ColumnarScan) on _hyper_1_1_chunk
-   ->  Index Scan using compress_hyper_2_2_chunk_device__ts_meta_min_1__ts_meta_max_idx on compress_hyper_2_2_chunk
+                                                       QUERY PLAN                                                       
+------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (ColumnarScan) on _hyper_240_343_chunk
+   ->  Index Scan using compress_hyper_241_344_chunk_device__ts_meta_min_1__ts_meta_idx on compress_hyper_241_344_chunk
          Index Cond: (device = 'd1'::text)
+(3 rows)
 
 SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time DESC;
-             time             | tags  
-------------------------------+-------
- Wed Jan 01 05:00:00 2025 UTC | tag-c
- Wed Jan 01 04:00:00 2025 UTC | tag-b
- Wed Jan 01 03:00:00 2025 UTC | tag-a
- Wed Jan 01 02:00:00 2025 UTC | tag-c
- Wed Jan 01 01:00:00 2025 UTC | tag-b
- Wed Jan 01 00:00:00 2025 UTC | tag-a
+          time          | tags  
+------------------------+-------
+ 2025-01-01 05:00:00+00 | tag-c
+ 2025-01-01 04:00:00+00 | tag-b
+ 2025-01-01 03:00:00+00 | tag-a
+ 2025-01-01 02:00:00+00 | tag-c
+ 2025-01-01 01:00:00+00 | tag-b
+ 2025-01-01 00:00:00+00 | tag-a
+(6 rows)
 
 --------------------------------------------------------------------------------
 -- test_flat_dict_sorted_merge_multi_segment:
@@ -103,46 +122,52 @@ SELECT time, tags FROM fd_metrics WHERE device = 'd1' ORDER BY time DESC;
 -- resolve against its own segment dictionary (d1 -> tag-a/b/c, d2 -> tag-x/y/z).
 --------------------------------------------------------------------------------
 SET timescaledb.debug_require_batch_sorted_merge = 'allow';
+SET
 :PREFIX SELECT time, device, tags FROM fd_metrics ORDER BY time, device;
---- QUERY PLAN ---
+                              QUERY PLAN                              
+----------------------------------------------------------------------
  Sort
-   Sort Key: _hyper_1_1_chunk."time", _hyper_1_1_chunk.device
-   ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk
-         ->  Seq Scan on compress_hyper_2_2_chunk
+   Sort Key: _hyper_240_343_chunk."time", _hyper_240_343_chunk.device
+   ->  Custom Scan (ColumnarScan) on _hyper_240_343_chunk
+         ->  Seq Scan on compress_hyper_241_344_chunk
+(4 rows)
 
 SELECT time, device, tags FROM fd_metrics ORDER BY time, device;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 00:00:00 2025 UTC | d1     | tag-a
- Wed Jan 01 00:00:00 2025 UTC | d2     | tag-x
- Wed Jan 01 01:00:00 2025 UTC | d1     | tag-b
- Wed Jan 01 01:00:00 2025 UTC | d2     | tag-y
- Wed Jan 01 02:00:00 2025 UTC | d1     | tag-c
- Wed Jan 01 02:00:00 2025 UTC | d2     | tag-z
- Wed Jan 01 03:00:00 2025 UTC | d1     | tag-a
- Wed Jan 01 03:00:00 2025 UTC | d2     | tag-x
- Wed Jan 01 04:00:00 2025 UTC | d1     | tag-b
- Wed Jan 01 04:00:00 2025 UTC | d2     | tag-y
- Wed Jan 01 05:00:00 2025 UTC | d1     | tag-c
- Wed Jan 01 05:00:00 2025 UTC | d2     | tag-z
+          time          | device | tags  
+------------------------+--------+-------
+ 2025-01-01 00:00:00+00 | d1     | tag-a
+ 2025-01-01 00:00:00+00 | d2     | tag-x
+ 2025-01-01 01:00:00+00 | d1     | tag-b
+ 2025-01-01 01:00:00+00 | d2     | tag-y
+ 2025-01-01 02:00:00+00 | d1     | tag-c
+ 2025-01-01 02:00:00+00 | d2     | tag-z
+ 2025-01-01 03:00:00+00 | d1     | tag-a
+ 2025-01-01 03:00:00+00 | d2     | tag-x
+ 2025-01-01 04:00:00+00 | d1     | tag-b
+ 2025-01-01 04:00:00+00 | d2     | tag-y
+ 2025-01-01 05:00:00+00 | d1     | tag-c
+ 2025-01-01 05:00:00+00 | d2     | tag-z
+(12 rows)
 
 SELECT time, device, tags FROM fd_metrics ORDER BY time DESC, device;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 05:00:00 2025 UTC | d1     | tag-c
- Wed Jan 01 05:00:00 2025 UTC | d2     | tag-z
- Wed Jan 01 04:00:00 2025 UTC | d1     | tag-b
- Wed Jan 01 04:00:00 2025 UTC | d2     | tag-y
- Wed Jan 01 03:00:00 2025 UTC | d1     | tag-a
- Wed Jan 01 03:00:00 2025 UTC | d2     | tag-x
- Wed Jan 01 02:00:00 2025 UTC | d1     | tag-c
- Wed Jan 01 02:00:00 2025 UTC | d2     | tag-z
- Wed Jan 01 01:00:00 2025 UTC | d1     | tag-b
- Wed Jan 01 01:00:00 2025 UTC | d2     | tag-y
- Wed Jan 01 00:00:00 2025 UTC | d1     | tag-a
- Wed Jan 01 00:00:00 2025 UTC | d2     | tag-x
+          time          | device | tags  
+------------------------+--------+-------
+ 2025-01-01 05:00:00+00 | d1     | tag-c
+ 2025-01-01 05:00:00+00 | d2     | tag-z
+ 2025-01-01 04:00:00+00 | d1     | tag-b
+ 2025-01-01 04:00:00+00 | d2     | tag-y
+ 2025-01-01 03:00:00+00 | d1     | tag-a
+ 2025-01-01 03:00:00+00 | d2     | tag-x
+ 2025-01-01 02:00:00+00 | d1     | tag-c
+ 2025-01-01 02:00:00+00 | d2     | tag-z
+ 2025-01-01 01:00:00+00 | d1     | tag-b
+ 2025-01-01 01:00:00+00 | d2     | tag-y
+ 2025-01-01 00:00:00+00 | d1     | tag-a
+ 2025-01-01 00:00:00+00 | d2     | tag-x
+(12 rows)
 
 RESET timescaledb.debug_require_batch_sorted_merge;
+RESET
 --------------------------------------------------------------------------------
 -- test_flat_dict_select_only_dict_column:
 -- Selecting ONLY the flat_dictionary column with an ORDER BY that triggers a
@@ -165,6 +190,7 @@ SELECT tags FROM fd_metrics ORDER BY time DESC, device;
  tag-y
  tag-a
  tag-x
+(12 rows)
 
 -- Correctness cross-check: aggregate that must read every value back.
 SELECT device, count(DISTINCT tags) AS n_tags, string_agg(DISTINCT tags, ',' ORDER BY tags) AS tags
@@ -173,6 +199,7 @@ FROM fd_metrics GROUP BY device ORDER BY device;
 --------+--------+-------------------
  d1     |      3 | tag-a,tag-b,tag-c
  d2     |      3 | tag-x,tag-y,tag-z
+(2 rows)
 
 --------------------------------------------------------------------------------
 -- Reverse + multi-segment with more than one batch per segment. Lower the batch
@@ -189,16 +216,20 @@ CREATE TABLE fd_many(
     tsdb.segmentby='device',
     tsdb.compress_algorithm='tags flat_dictionary'
 );
-NOTICE:  using column "time" as partitioning column
+psql:/tmp/fd_test_full.sql:112: NOTICE:  using column "time" as partitioning column
+HINT:  Use "timescaledb.partition_column" to specify a different column to use as partitioning column.
+CREATE TABLE
 INSERT INTO fd_many
 SELECT '2025-01-01'::timestamptz + (g || ' minutes')::interval,
        'dev' || (g % 3),
        'tag-' || (g % 7)
 FROM generate_series(0, 999) g;
+INSERT 0 1000
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_many') ch;
  count 
 -------
      1
+(1 row)
 
 -- Verify flat_dictionary is active in catalog
 SELECT relid::regclass, segmentby, orderby, algorithm
@@ -207,6 +238,7 @@ WHERE relid = 'fd_many'::regclass;
   relid  | segmentby | orderby | algorithm 
 ---------+-----------+---------+-----------
  fd_many | {device}  | {time}  | {tags=8}
+(1 row)
 
 -- Forward and reverse full scans must agree on the multiset of values and be
 -- exact reverses of each other on the orderby column.
@@ -234,6 +266,7 @@ SELECT device, tags, count(*) FROM fd_many GROUP BY device, tags ORDER BY device
  dev2   | tag-4 |    48
  dev2   | tag-5 |    48
  dev2   | tag-6 |    47
+(21 rows)
 
 SELECT count(*) AS total,
        count(DISTINCT tags) AS distinct_tags,
@@ -242,26 +275,29 @@ FROM fd_many;
  total | distinct_tags | distinct_devices 
 -------+---------------+------------------
   1000 |             7 |                3
+(1 row)
 
 -- First and last few rows in each direction (values must be correct, not NULL
 -- or cross-segment garbage).
 SELECT time, device, tags FROM fd_many ORDER BY time ASC LIMIT 5;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 00:00:00 2025 UTC | dev0   | tag-0
- Wed Jan 01 00:01:00 2025 UTC | dev1   | tag-1
- Wed Jan 01 00:02:00 2025 UTC | dev2   | tag-2
- Wed Jan 01 00:03:00 2025 UTC | dev0   | tag-3
- Wed Jan 01 00:04:00 2025 UTC | dev1   | tag-4
+          time          | device | tags  
+------------------------+--------+-------
+ 2025-01-01 00:00:00+00 | dev0   | tag-0
+ 2025-01-01 00:01:00+00 | dev1   | tag-1
+ 2025-01-01 00:02:00+00 | dev2   | tag-2
+ 2025-01-01 00:03:00+00 | dev0   | tag-3
+ 2025-01-01 00:04:00+00 | dev1   | tag-4
+(5 rows)
 
 SELECT time, device, tags FROM fd_many ORDER BY time DESC LIMIT 5;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 16:39:00 2025 UTC | dev0   | tag-5
- Wed Jan 01 16:38:00 2025 UTC | dev2   | tag-4
- Wed Jan 01 16:37:00 2025 UTC | dev1   | tag-3
- Wed Jan 01 16:36:00 2025 UTC | dev0   | tag-2
- Wed Jan 01 16:35:00 2025 UTC | dev2   | tag-1
+          time          | device | tags  
+------------------------+--------+-------
+ 2025-01-01 16:39:00+00 | dev0   | tag-5
+ 2025-01-01 16:38:00+00 | dev2   | tag-4
+ 2025-01-01 16:37:00+00 | dev1   | tag-3
+ 2025-01-01 16:36:00+00 | dev0   | tag-2
+ 2025-01-01 16:35:00+00 | dev2   | tag-1
+(5 rows)
 
 --------------------------------------------------------------------------------
 -- Regression test: compression must not crash with > 1000 rows per segment.
@@ -281,6 +317,7 @@ CREATE TABLE fd_large_segment(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 -- 2000 rows in a single segment (device = 'dev0') — well above batch size (1000)
 -- Tags are 100-2100 bytes long (matching real-world data: avg 202, max 2107)
 INSERT INTO fd_large_segment
@@ -291,19 +328,23 @@ SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
                  repeat('x', 100 + (g % 2000)) || '"]'
        END
 FROM generate_series(1, 2000) g;
+INSERT 0 2000
 -- This must not crash:
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_large_segment') ch;
  count 
 -------
      1
+(1 row)
 
 -- Verify data survives round-trip (read back from compressed)
 SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags FROM fd_large_segment;
  total | non_null | distinct_tags 
 -------+----------+---------------
   2000 |     1960 |          1960
+(1 row)
 
 DROP TABLE fd_large_segment CASCADE;
+DROP TABLE
 --------------------------------------------------------------------------------
 -- Edge case: NULL values in flat_dictionary column
 -- NULLs must be preserved through compression/decompression round-trip.
@@ -320,6 +361,7 @@ CREATE TABLE fd_nulls(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 INSERT INTO fd_nulls VALUES
 ('2025-01-01 00:00', 'dev0', 'tag-a'),
 ('2025-01-01 01:00', 'dev0', NULL),
@@ -329,23 +371,29 @@ INSERT INTO fd_nulls VALUES
 ('2025-01-01 00:00', 'dev1', NULL),
 ('2025-01-01 01:00', 'dev1', 'tag-x'),
 ('2025-01-01 02:00', 'dev1', NULL);
+INSERT 0 8
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_nulls') ch;
+psql:/tmp/fd_test_full.sql:206: WARNING:  poor compression ratio detected for chunk "_hyper_246_349_chunk"'
+DETAIL:  Chunk "_hyper_246_349_chunk" has a poor compression ratio: 0.80. Size before compression: 32768 bytes. Size after compression: 40960 bytes
+HINT:  Changing compression settings for "fd_nulls" can improve compression rate
  count 
 -------
      1
+(1 row)
 
 -- NULLs must appear in correct positions
 SELECT time, device, tags FROM fd_nulls ORDER BY device, time;
-             time             | device | tags  
-------------------------------+--------+-------
- Wed Jan 01 00:00:00 2025 UTC | dev0   | tag-a
- Wed Jan 01 01:00:00 2025 UTC | dev0   | 
- Wed Jan 01 02:00:00 2025 UTC | dev0   | tag-b
- Wed Jan 01 03:00:00 2025 UTC | dev0   | 
- Wed Jan 01 04:00:00 2025 UTC | dev0   | tag-a
- Wed Jan 01 00:00:00 2025 UTC | dev1   | 
- Wed Jan 01 01:00:00 2025 UTC | dev1   | tag-x
- Wed Jan 01 02:00:00 2025 UTC | dev1   | 
+          time          | device | tags  
+------------------------+--------+-------
+ 2025-01-01 00:00:00+00 | dev0   | tag-a
+ 2025-01-01 01:00:00+00 | dev0   | 
+ 2025-01-01 02:00:00+00 | dev0   | tag-b
+ 2025-01-01 03:00:00+00 | dev0   | 
+ 2025-01-01 04:00:00+00 | dev0   | tag-a
+ 2025-01-01 00:00:00+00 | dev1   | 
+ 2025-01-01 01:00:00+00 | dev1   | tag-x
+ 2025-01-01 02:00:00+00 | dev1   | 
+(8 rows)
 
 -- Aggregate must count NULLs correctly
 SELECT device, count(*) AS total, count(tags) AS non_null, count(*) - count(tags) AS nulls
@@ -354,8 +402,10 @@ FROM fd_nulls GROUP BY device ORDER BY device;
 --------+-------+----------+-------
  dev0   |     5 |        3 |     2
  dev1   |     3 |        1 |     2
+(2 rows)
 
 DROP TABLE fd_nulls CASCADE;
+DROP TABLE
 --------------------------------------------------------------------------------
 -- Edge case: single-row segments
 -- Each segment has exactly 1 row — tests minimal dictionary (1 entry).
@@ -372,14 +422,20 @@ CREATE TABLE fd_single_row(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 INSERT INTO fd_single_row VALUES
 ('2025-01-01 00:00', 'a', 'only-tag'),
 ('2025-01-01 00:00', 'b', 'other-tag'),
 ('2025-01-01 00:00', 'c', 'third-tag');
+INSERT 0 3
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_single_row') ch;
+psql:/tmp/fd_test_full.sql:239: WARNING:  poor compression ratio detected for chunk "_hyper_248_351_chunk"'
+DETAIL:  Chunk "_hyper_248_351_chunk" has a poor compression ratio: 0.80. Size before compression: 32768 bytes. Size after compression: 40960 bytes
+HINT:  Changing compression settings for "fd_single_row" can improve compression rate
  count 
 -------
      1
+(1 row)
 
 SELECT device, tags FROM fd_single_row ORDER BY device;
  device |   tags    
@@ -387,8 +443,10 @@ SELECT device, tags FROM fd_single_row ORDER BY device;
  a      | only-tag
  b      | other-tag
  c      | third-tag
+(3 rows)
 
 DROP TABLE fd_single_row CASCADE;
+DROP TABLE
 --------------------------------------------------------------------------------
 -- Edge case: many distinct values (>255) forces 16-bit index width
 -- Verifies the index_width upgrade path in flat_dict_compressor_finish.
@@ -405,39 +463,46 @@ CREATE TABLE fd_wide_dict(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 -- 500 rows with 300 distinct tags in one segment → forces 16-bit index
 INSERT INTO fd_wide_dict
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev0',
        '["' || (g % 300) || '","' || repeat('y', 100 + (g % 2000)) || '"]'
 FROM generate_series(1, 500) g;
+INSERT 0 500
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_wide_dict') ch;
  count 
 -------
      1
+(1 row)
 
 -- Verify round-trip: count distinct must match
 SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_wide_dict;
  total | distinct_tags 
 -------+---------------
    500 |           500
+(1 row)
 
 -- Spot check some values
 SELECT time, tags FROM fd_wide_dict ORDER BY time LIMIT 3;
-             time             |                                                      tags                                                       
-------------------------------+-----------------------------------------------------------------------------------------------------------------
- Wed Jan 01 00:00:01 2025 UTC | ["1","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
- Wed Jan 01 00:00:02 2025 UTC | ["2","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
- Wed Jan 01 00:00:03 2025 UTC | ["3","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+          time          |                                                      tags                                                       
+------------------------+-----------------------------------------------------------------------------------------------------------------
+ 2025-01-01 00:00:01+00 | ["1","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ 2025-01-01 00:00:02+00 | ["2","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ 2025-01-01 00:00:03+00 | ["3","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+(3 rows)
 
 SELECT time, tags FROM fd_wide_dict ORDER BY time DESC LIMIT 3;
-             time             |                                                                                                                                                                                                                                                                                                                tags                                                                                                                                                                                                                                                                                                                
-------------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Wed Jan 01 00:08:20 2025 UTC | ["200","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
- Wed Jan 01 00:08:19 2025 UTC | ["199","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
- Wed Jan 01 00:08:18 2025 UTC | ["198","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+          time          |                                                                                                                                                                                                                                                                                                                tags                                                                                                                                                                                                                                                                                                                
+------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ 2025-01-01 00:08:20+00 | ["200","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ 2025-01-01 00:08:19+00 | ["199","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+ 2025-01-01 00:08:18+00 | ["198","yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"]
+(3 rows)
 
 DROP TABLE fd_wide_dict CASCADE;
+DROP TABLE
 --------------------------------------------------------------------------------
 -- Edge case: all rows have the same tag value (dictionary cardinality = 1)
 -- Tests that a degenerate dictionary (single entry) works correctly.
@@ -454,22 +519,30 @@ CREATE TABLE fd_uniform(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 INSERT INTO fd_uniform
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev0',
        'always-same'
 FROM generate_series(1, 100) g;
+INSERT 0 100
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_uniform') ch;
+psql:/tmp/fd_test_full.sql:303: WARNING:  poor compression ratio detected for chunk "_hyper_252_355_chunk"'
+DETAIL:  Chunk "_hyper_252_355_chunk" has a poor compression ratio: 0.80. Size before compression: 32768 bytes. Size after compression: 40960 bytes
+HINT:  Changing compression settings for "fd_uniform" can improve compression rate
  count 
 -------
      1
+(1 row)
 
 SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM fd_uniform;
  total | distinct_tags 
 -------+---------------
    100 |             1
+(1 row)
 
 DROP TABLE fd_uniform CASCADE;
+DROP TABLE
 --------------------------------------------------------------------------------
 -- Edge case: empty segment (device with no rows after filter)
 -- Tests that compression handles segments gracefully when no data matches.
@@ -486,23 +559,31 @@ CREATE TABLE fd_empty_seg(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 -- Only one device has data
 INSERT INTO fd_empty_seg
 SELECT '2025-01-01'::timestamptz + (g || ' minutes')::interval,
        'dev0',
        'tag-' || (g % 3)
 FROM generate_series(1, 50) g;
+INSERT 0 50
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_empty_seg') ch;
+psql:/tmp/fd_test_full.sql:333: WARNING:  poor compression ratio detected for chunk "_hyper_254_357_chunk"'
+DETAIL:  Chunk "_hyper_254_357_chunk" has a poor compression ratio: 0.80. Size before compression: 32768 bytes. Size after compression: 40960 bytes
+HINT:  Changing compression settings for "fd_empty_seg" can improve compression rate
  count 
 -------
      1
+(1 row)
 
 SELECT count(*) AS total FROM fd_empty_seg;
  total 
 -------
     50
+(1 row)
 
 DROP TABLE fd_empty_seg CASCADE;
+DROP TABLE
 --------------------------------------------------------------------------------
 -- Stress test: many segments with batch flushes in each
 -- 5 devices × 1500 rows each = 7500 total, each segment > batch size (1000)
@@ -520,6 +601,7 @@ CREATE TABLE fd_stress(
     tsdb.orderby = 'time',
     tsdb.compress_algorithm = 'tags flat_dictionary'
 );
+CREATE TABLE
 INSERT INTO fd_stress
 SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
        'dev' || (g % 5),
@@ -527,10 +609,12 @@ SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
             ELSE '["' || (g % 1000) || '","cmd-' || (g % 10) || '","' || repeat(chr(65 + (g % 26)), 80 + (g % 2000)) || '"]'
        END
 FROM generate_series(1, 7500) g;
+INSERT 0 7500
 SELECT count(compress_chunk(ch)) FROM show_chunks('fd_stress') ch;
  count 
 -------
      1
+(1 row)
 
 -- Verify all data intact after round-trip (reads from compressed chunks)
 SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
@@ -542,26 +626,679 @@ FROM fd_stress GROUP BY device ORDER BY device;
  dev2   | 1500 |     1500 |          1500
  dev3   | 1500 |     1500 |          1500
  dev4   | 1500 |     1500 |          1500
+(5 rows)
 
 -- Verify ordering preserved
 SELECT time, device, left(tags, 30) AS tags_prefix FROM fd_stress ORDER BY time ASC LIMIT 3;
-             time             | device |          tags_prefix           
-------------------------------+--------+--------------------------------
- Wed Jan 01 00:00:01 2025 UTC | dev1   | ["1","cmd-1","BBBBBBBBBBBBBBBB
- Wed Jan 01 00:00:02 2025 UTC | dev2   | ["2","cmd-2","CCCCCCCCCCCCCCCC
- Wed Jan 01 00:00:03 2025 UTC | dev3   | ["3","cmd-3","DDDDDDDDDDDDDDDD
+          time          | device |          tags_prefix           
+------------------------+--------+--------------------------------
+ 2025-01-01 00:00:01+00 | dev1   | ["1","cmd-1","BBBBBBBBBBBBBBBB
+ 2025-01-01 00:00:02+00 | dev2   | ["2","cmd-2","CCCCCCCCCCCCCCCC
+ 2025-01-01 00:00:03+00 | dev3   | ["3","cmd-3","DDDDDDDDDDDDDDDD
+(3 rows)
 
 SELECT time, device, left(tags, 30) AS tags_prefix FROM fd_stress ORDER BY time DESC LIMIT 3;
-             time             | device |          tags_prefix           
-------------------------------+--------+--------------------------------
- Wed Jan 01 02:05:00 2025 UTC | dev0   | 
- Wed Jan 01 02:04:59 2025 UTC | dev4   | ["499","cmd-9","LLLLLLLLLLLLLL
- Wed Jan 01 02:04:58 2025 UTC | dev3   | ["498","cmd-8","KKKKKKKKKKKKKK
+          time          | device |          tags_prefix           
+------------------------+--------+--------------------------------
+ 2025-01-01 02:05:00+00 | dev0   | 
+ 2025-01-01 02:04:59+00 | dev4   | ["499","cmd-9","LLLLLLLLLLLLLL
+ 2025-01-01 02:04:58+00 | dev3   | ["498","cmd-8","KKKKKKKKKKKKKK
+(3 rows)
 
 DROP TABLE fd_stress CASCADE;
-DROP TABLE fd_metrics CASCADE;
-DROP TABLE fd_many CASCADE;
+DROP TABLE
+--------------------------------------------------------------------------------
+-- Regression: decompression with many segments (tests per-segment cache lookup)
+-- The cache must return the correct dictionary for each (host, metric) segment.
+-- With many segments that have DIFFERENT dictionary cardinalities, a cache
+-- mismatch would cause idx >= num_values and crash.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_decompress_many(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    tags text
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'host, metric',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+CREATE TABLE
+-- 20 hosts × 5 metrics = 100 segments. Each segment has different number of
+-- distinct tags (3 to 50) with long values (200-2100 bytes). Some NULLs.
+INSERT INTO fd_decompress_many
+SELECT '2025-01-01'::timestamptz + (g || ' seconds')::interval,
+       'host-' || (g % 20),
+       'metric-' || (g % 5),
+       CASE WHEN g % 80 = 0 THEN NULL
+            ELSE '["' || (g % (3 + (g % 20) * 2)) || '","' ||
+                 repeat(chr(65 + (g % 26)), 100 + (g % 2000)) || '"]'
+       END
+FROM generate_series(1, 10000) g;
+INSERT 0 10000
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_decompress_many') ch;
+ count 
+-------
+     1
+(1 row)
+
+-- Verify decompression: reading tags back must not crash
+SET max_parallel_workers_per_gather = 0;
+SET
+SELECT host, metric, count(*) AS rows, count(tags) AS non_null
+FROM fd_decompress_many
+GROUP BY host, metric
+ORDER BY host, metric
+LIMIT 10;
+  host   |  metric  | rows | non_null 
+---------+----------+------+----------
+ host-0  | metric-0 |  500 |      375
+ host-1  | metric-1 |  500 |      500
+ host-10 | metric-0 |  500 |      500
+ host-11 | metric-1 |  500 |      500
+ host-12 | metric-2 |  500 |      500
+ host-13 | metric-3 |  500 |      500
+ host-14 | metric-4 |  500 |      500
+ host-15 | metric-0 |  500 |      500
+ host-16 | metric-1 |  500 |      500
+ host-17 | metric-2 |  500 |      500
+(10 rows)
+
 RESET max_parallel_workers_per_gather;
+RESET
+DROP TABLE fd_decompress_many CASCADE;
+DROP TABLE
+--------------------------------------------------------------------------------
+-- Regression: cache key bug + batch sorted merge with NULL-dictionary segments
+--
+-- This reproduces three bugs fixed together:
+-- 1. The flat_dict cache key was always empty (key_len=0) when segmentby columns
+--    were not referenced by the query, because the planner did not assign them a
+--    custom_scan_attno. All segments shared one dictionary -> wrong results/crash.
+-- 2. The prefetch did not insert a cache entry for segments whose flat_dict
+--    column is entirely NULL (no dictionary row). Batch sorted merge reads data
+--    batches before dictionary rows, triggering the prefetch, which then missed
+--    these NULL-dict segments -> "no segment dictionary found" error.
+-- 3. Dictionary rows (count==0) pushed into the batch sorted merge heap caused
+--    an Assert(total_batch_rows > 0) crash in compressed_batch_save_first_tuple.
+--
+-- The test uses TWO segmentby columns and multiple segments where SOME have NULL
+-- tags (no dictionary) and others have non-trivial dictionaries with different
+-- cardinalities. All data is deterministic so every value can be verified on read.
+--------------------------------------------------------------------------------
+CREATE TABLE fd_cache_key_bug(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    value float NOT NULL,
+    tags text
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 hour',
+    tsdb.segmentby = 'host,metric',
+    tsdb.orderby = 'time desc',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+CREATE TABLE
+-- Reference table (plain heap) to compare against after decompression.
+CREATE TABLE fd_cache_key_expected(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    value float NOT NULL,
+    tags text
+);
+CREATE TABLE
+-- Generate deterministic data with:
+-- * 3 hosts (alpha, bravo, charlie) -- different segment key
+-- * 4 metrics per host, each with DIFFERENT tag patterns and cardinalities:
+--   - disk_io: 19 distinct tags (alpha), 13 (bravo), 5 (charlie)
+--   - network: 7 distinct tags (alpha), 4 (bravo) -- charlie has no network
+--   - process: 23 distinct tags (alpha), 11 (bravo) -- charlie has no process
+--   - temperature: NULL tags always (all hosts)
+-- * 1000-2300 rows per segment for multi-batch coverage (batch size = 1000)
+-- * Tags include varied lengths (50-400 chars) with host-specific content
+-- * value encodes position: host_id * 1e6 + metric_id * 1e4 + row_number
+-- Host alpha: disk_io (19 tags, 2100 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'disk_io',
+       1000000 + 10000 + g,
+       '["' || (CASE g % 19
+           WHEN 0 THEN 'sda' WHEN 1 THEN 'sdb' WHEN 2 THEN 'nvme0n1'
+           WHEN 3 THEN 'nvme0n1p1' WHEN 4 THEN 'nvme0n1p2'
+           WHEN 5 THEN 'dm-0' WHEN 6 THEN 'dm-1'
+           WHEN 7 THEN 'loop0' WHEN 8 THEN 'loop1' WHEN 9 THEN 'loop2'
+           WHEN 10 THEN 'vda' WHEN 11 THEN 'vdb'
+           WHEN 12 THEN 'xvda' WHEN 13 THEN 'xvdb'
+           WHEN 14 THEN 'md0' WHEN 15 THEN 'md127'
+           WHEN 16 THEN 'mmcblk0' WHEN 17 THEN 'mmcblk0p1'
+           ELSE 'sr0'
+       END) || '","bytes_read","' || repeat('x', 50 + (g % 200)) || '"]'
+FROM generate_series(1, 2100) g;
+INSERT 0 2100
+-- Host alpha: network (7 tags, 1500 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'network',
+       1000000 + 20000 + g,
+       '["' || (CASE g % 7
+           WHEN 0 THEN 'eth0' WHEN 1 THEN 'eth1' WHEN 2 THEN 'ens192'
+           WHEN 3 THEN 'docker0' WHEN 4 THEN 'br-a1b2c3d4e5f6'
+           WHEN 5 THEN 'veth7890abcd' ELSE 'lo'
+       END) || '","rx_bytes","' || repeat('n', 80 + (g % 150)) || '"]'
+FROM generate_series(1, 1500) g;
+INSERT 0 1500
+-- Host alpha: process (23 tags, 2300 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'process',
+       1000000 + 30000 + g,
+       '["' || (CASE g % 23
+           WHEN 0 THEN 'systemd' WHEN 1 THEN 'sshd' WHEN 2 THEN 'postgres'
+           WHEN 3 THEN 'node_exporter' WHEN 4 THEN 'prometheus'
+           WHEN 5 THEN 'grafana-server' WHEN 6 THEN 'alertmanager'
+           WHEN 7 THEN 'nginx' WHEN 8 THEN 'redis-server' WHEN 9 THEN 'mongod'
+           WHEN 10 THEN 'kubelet' WHEN 11 THEN 'containerd' WHEN 12 THEN 'dockerd'
+           WHEN 13 THEN 'etcd' WHEN 14 THEN 'coredns'
+           WHEN 15 THEN 'kube-apiserver' WHEN 16 THEN 'kube-scheduler'
+           WHEN 17 THEN 'kube-proxy' WHEN 18 THEN 'fluentd'
+           WHEN 19 THEN 'elasticsearch' WHEN 20 THEN 'kibana'
+           WHEN 21 THEN 'logstash' ELSE 'java-app-service-worker'
+       END) || '","cpu_seconds","' || repeat('p', 100 + (g % 300)) || '"]'
+FROM generate_series(1, 2300) g;
+INSERT 0 2300
+-- Host alpha: temperature (NULL tags, 500 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'temperature', 1000000 + 40000 + g, NULL
+FROM generate_series(1, 500) g;
+INSERT 0 500
+-- Host bravo: disk_io (13 tags -- DIFFERENT cardinality from alpha!, 1800 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'disk_io',
+       2000000 + 10000 + g,
+       '["' || (CASE g % 13
+           WHEN 0 THEN 'sda' WHEN 1 THEN 'sdb' WHEN 2 THEN 'sdc' WHEN 3 THEN 'sdd'
+           WHEN 4 THEN 'nvme0n1' WHEN 5 THEN 'nvme1n1' WHEN 6 THEN 'nvme2n1'
+           WHEN 7 THEN 'dm-0' WHEN 8 THEN 'dm-1' WHEN 9 THEN 'dm-2'
+           WHEN 10 THEN 'dm-3' WHEN 11 THEN 'md0' ELSE 'md1'
+       END) || '","iops","' || repeat('b', 60 + (g % 180)) || '"]'
+FROM generate_series(1, 1800) g;
+INSERT 0 1800
+-- Host bravo: network (4 tags, 1200 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'network',
+       2000000 + 20000 + g,
+       '["' || (CASE g % 4
+           WHEN 0 THEN 'bond0' WHEN 1 THEN 'bond0.100'
+           WHEN 2 THEN 'bond0.200' ELSE 'mgmt0'
+       END) || '","tx_packets","' || repeat('v', 70 + (g % 120)) || '"]'
+FROM generate_series(1, 1200) g;
+INSERT 0 1200
+-- Host bravo: process (11 tags, 1600 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'process',
+       2000000 + 30000 + g,
+       '["' || (CASE g % 11
+           WHEN 0 THEN 'haproxy' WHEN 1 THEN 'keepalived' WHEN 2 THEN 'bird'
+           WHEN 3 THEN 'frr-zebra' WHEN 4 THEN 'frr-bgpd' WHEN 5 THEN 'chrony'
+           WHEN 6 THEN 'rsyslog' WHEN 7 THEN 'auditd' WHEN 8 THEN 'sssd'
+           WHEN 9 THEN 'tuned' ELSE 'polkitd'
+       END) || '","mem_rss","' || repeat('m', 90 + (g % 250)) || '"]'
+FROM generate_series(1, 1600) g;
+INSERT 0 1600
+-- Host bravo: temperature (NULL tags, 800 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'temperature', 2000000 + 40000 + g, NULL
+FROM generate_series(1, 800) g;
+INSERT 0 800
+-- Host charlie: disk_io (5 tags only -- small dict, 1000 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'charlie', 'disk_io',
+       3000000 + 10000 + g,
+       '["' || (CASE g % 5
+           WHEN 0 THEN '/dev/vda' WHEN 1 THEN '/dev/vda1' WHEN 2 THEN '/dev/vda2'
+           WHEN 3 THEN '/dev/vdb' ELSE '/dev/vdb1'
+       END) || '","latency_us","' || repeat('c', 40 + (g % 100)) || '"]'
+FROM generate_series(1, 1000) g;
+INSERT 0 1000
+-- Host charlie: temperature (NULL tags, 600 rows)
+INSERT INTO fd_cache_key_bug
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'charlie', 'temperature', 3000000 + 40000 + g, NULL
+FROM generate_series(1, 600) g;
+INSERT 0 600
+-- Copy all data into reference table BEFORE compression
+INSERT INTO fd_cache_key_expected SELECT * FROM fd_cache_key_bug;
+INSERT 0 13400
+-- Compress
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_cache_key_bug') ch;
+ count 
+-------
+     1
+(1 row)
+
+SET max_parallel_workers_per_gather = 0;
+SET
+--------------------------------------------------------------------------------
+-- Correctness: full data round-trip comparison.
+-- Every single row must match between compressed and reference table.
+--------------------------------------------------------------------------------
+-- Total row counts must match:
+SELECT
+    (SELECT count(*) FROM fd_cache_key_bug) AS compressed_count,
+    (SELECT count(*) FROM fd_cache_key_expected) AS expected_count;
+ compressed_count | expected_count 
+------------------+----------------
+            13400 |          13400
+(1 row)
+
+-- Exact row-by-row comparison: EXCEPT must return 0 rows.
+-- This catches ANY difference (wrong tags, wrong value, extra/missing rows):
+SELECT count(*) AS mismatched_rows FROM (
+    (SELECT time, host, metric, value, tags FROM fd_cache_key_bug
+     EXCEPT
+     SELECT time, host, metric, value, tags FROM fd_cache_key_expected)
+    UNION ALL
+    (SELECT time, host, metric, value, tags FROM fd_cache_key_expected
+     EXCEPT
+     SELECT time, host, metric, value, tags FROM fd_cache_key_bug)
+) diff;
+ mismatched_rows 
+-----------------
+               0
+(1 row)
+
+-- Per-segment verification: distinct tag count and NULL-tag handling
+SELECT e.host, e.metric, e.distinct_tags AS expected, c.distinct_tags AS actual,
+       e.distinct_tags = c.distinct_tags AS ok
+FROM (SELECT host, metric, count(DISTINCT tags) AS distinct_tags
+      FROM fd_cache_key_expected GROUP BY host, metric) e
+JOIN (SELECT host, metric, count(DISTINCT tags) AS distinct_tags
+      FROM fd_cache_key_bug GROUP BY host, metric) c
+  ON e.host = c.host AND e.metric = c.metric
+ORDER BY e.host, e.metric;
+  host   |   metric    | expected | actual | ok 
+---------+-------------+----------+--------+----
+ alpha   | disk_io     |     2100 |   2100 | t
+ alpha   | network     |     1050 |   1050 | t
+ alpha   | process     |     2300 |   2300 | t
+ alpha   | temperature |        0 |      0 | t
+ bravo   | disk_io     |     1800 |   1800 | t
+ bravo   | network     |      120 |    120 | t
+ bravo   | process     |     1600 |   1600 | t
+ bravo   | temperature |        0 |      0 | t
+ charlie | disk_io     |      100 |    100 | t
+ charlie | temperature |        0 |      0 | t
+(10 rows)
+
+-- NULL-tags segments must be all NULL, no cross-segment contamination
+SELECT host, count(*) AS total, count(tags) AS non_null_tags
+FROM fd_cache_key_bug
+WHERE metric = 'temperature'
+GROUP BY host ORDER BY host;
+  host   | total | non_null_tags 
+---------+-------+---------------
+ alpha   |   500 |             0
+ bravo   |   800 |             0
+ charlie |   600 |             0
+(3 rows)
+
+--------------------------------------------------------------------------------
+-- Batch sorted merge: min/max triggers reordered reads that exercise the
+-- prefetch and dictionary-row-in-heap handling.
+--------------------------------------------------------------------------------
+SELECT min(time), max(time) FROM fd_cache_key_bug;
+          min           |          max           
+------------------------+------------------------
+ 2025-06-01 00:00:01+00 | 2025-06-01 00:38:20+00
+(1 row)
+
+-- Specific rows via ORDER BY (batch sorted merge path):
+SELECT time, host, metric, value, tags IS NOT NULL AS has_tags
+FROM fd_cache_key_bug ORDER BY time LIMIT 5;
+          time          | host  |   metric    |  value  | has_tags 
+------------------------+-------+-------------+---------+----------
+ 2025-06-01 00:00:01+00 | alpha | process     | 1030001 | t
+ 2025-06-01 00:00:01+00 | alpha | temperature | 1040001 | f
+ 2025-06-01 00:00:01+00 | alpha | disk_io     | 1010001 | t
+ 2025-06-01 00:00:01+00 | alpha | network     | 1020001 | t
+ 2025-06-01 00:00:01+00 | bravo | disk_io     | 2010001 | t
+(5 rows)
+
+SELECT time, host, metric, value, tags IS NOT NULL AS has_tags
+FROM fd_cache_key_bug ORDER BY time DESC LIMIT 5;
+          time          | host  | metric  |  value  | has_tags 
+------------------------+-------+---------+---------+----------
+ 2025-06-01 00:38:20+00 | alpha | process | 1032300 | t
+ 2025-06-01 00:38:19+00 | alpha | process | 1032299 | t
+ 2025-06-01 00:38:18+00 | alpha | process | 1032298 | t
+ 2025-06-01 00:38:17+00 | alpha | process | 1032297 | t
+ 2025-06-01 00:38:16+00 | alpha | process | 1032296 | t
+(5 rows)
+
+--------------------------------------------------------------------------------
+-- Queries that do NOT reference segmentby columns in the SELECT/WHERE:
+-- This is the core Bug 1 reproducer -- the cache key was empty without segmentby.
+--------------------------------------------------------------------------------
+SELECT count(tags) AS non_null_count FROM fd_cache_key_bug;
+ non_null_count 
+----------------
+          11500
+(1 row)
+
+SELECT count(DISTINCT tags) AS total_distinct_tags FROM fd_cache_key_bug;
+ total_distinct_tags 
+---------------------
+                9070
+(1 row)
+
+-- Cross-contamination checks:
+-- alpha.disk_io must never contain bravo's unique device names or metric labels
+SELECT count(*) AS cross_contamination FROM fd_cache_key_bug
+WHERE host = 'alpha' AND metric = 'disk_io'
+  AND (tags LIKE '%iops%' OR tags LIKE '%sdc%' OR tags LIKE '%sdd%'
+       OR tags LIKE '%nvme1n1%' OR tags LIKE '%nvme2n1%');
+ cross_contamination 
+---------------------
+                   0
+(1 row)
+
+-- bravo.network must never contain alpha's interface names
+SELECT count(*) AS cross_contamination FROM fd_cache_key_bug
+WHERE host = 'bravo' AND metric = 'network'
+  AND (tags LIKE '%eth0%' OR tags LIKE '%docker0%' OR tags LIKE '%ens192%');
+ cross_contamination 
+---------------------
+                   0
+(1 row)
+
+-- charlie.disk_io must never contain alpha/bravo process or network tags
+SELECT count(*) AS cross_contamination FROM fd_cache_key_bug
+WHERE host = 'charlie' AND metric = 'disk_io'
+  AND (tags LIKE '%systemd%' OR tags LIKE '%haproxy%' OR tags LIKE '%bond0%');
+ cross_contamination 
+---------------------
+                   0
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+RESET
+DROP TABLE fd_cache_key_bug CASCADE;
+DROP TABLE
+DROP TABLE fd_cache_key_expected;
+DROP TABLE
+--------------------------------------------------------------------------------
+-- Regression: long tags (up to 2400 bytes) round-trip through flat_dictionary.
+--
+-- Real-world Prometheus/OTel tag arrays can be 2000+ bytes. This exercises:
+-- * TOAST storage of dictionary blobs (many large entries)
+-- * Detoasting during cache-key build and dictionary materialization
+-- * Batch sorted merge with large, TOAST-ed dictionaries
+-- * Varying lengths within the same segment (100-2400 bytes)
+--------------------------------------------------------------------------------
+CREATE TABLE fd_long_tags(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    value float NOT NULL,
+    tags text
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 hour',
+    tsdb.segmentby = 'host,metric',
+    tsdb.orderby = 'time desc',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+CREATE TABLE
+CREATE TABLE fd_long_tags_expected(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    value float NOT NULL,
+    tags text
+);
+CREATE TABLE
+-- Host srv1, metric containers: 30 distinct tags, each 800-2400 bytes.
+-- Simulates container metadata with long image names, label sets, env vars.
+INSERT INTO fd_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'srv1', 'containers',
+       g,
+       '["container-' || (g % 30) || '",'
+       || '"image=registry.internal.corp/team-' || (g % 30) || '/service-'
+       || (CASE (g % 30) / 5
+           WHEN 0 THEN 'payment-gateway'
+           WHEN 1 THEN 'user-authentication'
+           WHEN 2 THEN 'order-processing'
+           WHEN 3 THEN 'inventory-management'
+           WHEN 4 THEN 'notification-service'
+           ELSE 'analytics-pipeline'
+       END)
+       || ':v1.' || (g % 30) || '.0",'
+       || '"namespace=production-' || (CASE g % 30
+           WHEN 0 THEN 'us-east-1' WHEN 1 THEN 'us-west-2' WHEN 2 THEN 'eu-central-1'
+           WHEN 3 THEN 'ap-southeast-1' WHEN 4 THEN 'eu-west-1'
+           ELSE 'region-' || (g % 30)
+       END) || '",'
+       || '"labels=' || repeat('k' || (g % 30)::text || '=v' || (g % 30)::text || ',',
+                                20 + (g % 30) * 2) || '",'
+       || '"env=' || repeat('ENV_VAR_' || (g % 30)::text || '=value_' || (g % 30)::text || ';',
+                            10 + (g % 30)) || '",'
+       || '"annotations=' || repeat('a', 200 + (g % 30) * 60) || '"]'
+FROM generate_series(1, 2500) g;
+INSERT 0 2500
+-- Host srv1, metric requests: 15 distinct tags, each 400-1200 bytes.
+-- Simulates HTTP request paths with query params.
+INSERT INTO fd_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'srv1', 'requests',
+       10000 + g,
+       '["endpoint=/api/v2/' || (CASE g % 15
+           WHEN 0 THEN 'users/profile/settings'
+           WHEN 1 THEN 'orders/checkout/confirm'
+           WHEN 2 THEN 'products/search/results'
+           WHEN 3 THEN 'inventory/warehouses/stock'
+           WHEN 4 THEN 'notifications/push/batch'
+           WHEN 5 THEN 'analytics/reports/daily'
+           WHEN 6 THEN 'auth/oauth2/token/refresh'
+           WHEN 7 THEN 'billing/invoices/generate'
+           WHEN 8 THEN 'shipping/tracking/updates'
+           WHEN 9 THEN 'support/tickets/create'
+           WHEN 10 THEN 'media/uploads/process'
+           WHEN 11 THEN 'cache/invalidate/pattern'
+           WHEN 12 THEN 'webhooks/delivery/retry'
+           WHEN 13 THEN 'config/features/toggle'
+           ELSE 'health/deep/dependencies'
+       END) || '?session_id=' || repeat('s', 100 + (g % 15) * 50)
+       || '&trace_id=' || repeat('t', 80 + (g % 15) * 30) || '"]'
+FROM generate_series(1, 1800) g;
+INSERT 0 1800
+-- Host srv2, metric containers: 25 distinct tags, each 1000-2400 bytes.
+-- DIFFERENT tag content from srv1 to catch cross-segment contamination.
+INSERT INTO fd_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'srv2', 'containers',
+       20000 + g,
+       '["pod-' || (g % 25) || '",'
+       || '"image=gcr.io/project-' || (g % 25) || '/microservice-'
+       || (CASE (g % 25) / 5
+           WHEN 0 THEN 'data-ingestion'
+           WHEN 1 THEN 'stream-processor'
+           WHEN 2 THEN 'model-serving'
+           WHEN 3 THEN 'feature-store'
+           ELSE 'batch-scheduler'
+       END)
+       || ':release-' || (g % 25) || '",'
+       || '"cluster=gke-prod-' || (CASE g % 25
+           WHEN 0 THEN 'us-central1-a' WHEN 1 THEN 'us-central1-b'
+           WHEN 2 THEN 'europe-west4-a' WHEN 3 THEN 'asia-east1-b'
+           ELSE 'zone-' || (g % 25)
+       END) || '",'
+       || '"resources=' || repeat('cpu=' || (g % 25)::text || 'm,mem=' || (g % 25 * 128)::text || 'Mi,',
+                                  15 + (g % 25) * 2) || '",'
+       || '"tolerations=' || repeat('T', 300 + (g % 25) * 70) || '"]'
+FROM generate_series(1, 2200) g;
+INSERT 0 2200
+-- Host srv2, metric sensors: NULL tags (to test NULL-dict + long-tag mix)
+INSERT INTO fd_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'srv2', 'sensors', 30000 + g, NULL
+FROM generate_series(1, 700) g;
+INSERT 0 700
+-- Copy before compression
+INSERT INTO fd_long_tags_expected SELECT * FROM fd_long_tags;
+INSERT 0 7200
+-- Verify we actually have long tags (the point of this test):
+SELECT
+    min(length(tags)) AS min_len,
+    avg(length(tags))::int AS avg_len,
+    max(length(tags)) AS max_len,
+    count(*) FILTER (WHERE length(tags) > 2000) AS over_2000_bytes
+FROM fd_long_tags
+WHERE tags IS NOT NULL;
+ min_len | avg_len | max_len | over_2000_bytes 
+---------+---------+---------+-----------------
+     245 |    1695 |    3499 |            2472
+(1 row)
+
+-- Compress
+SELECT count(compress_chunk(ch)) FROM show_chunks('fd_long_tags') ch;
+ count 
+-------
+     1
+(1 row)
+
+SET max_parallel_workers_per_gather = 0;
+SET
+-- Full round-trip: every row must survive compression unchanged.
+SELECT count(*) AS mismatched_rows FROM (
+    (SELECT time, host, metric, value, tags FROM fd_long_tags
+     EXCEPT
+     SELECT time, host, metric, value, tags FROM fd_long_tags_expected)
+    UNION ALL
+    (SELECT time, host, metric, value, tags FROM fd_long_tags_expected
+     EXCEPT
+     SELECT time, host, metric, value, tags FROM fd_long_tags)
+) diff;
+ mismatched_rows 
+-----------------
+               0
+(1 row)
+
+-- Verify tag lengths survived compression (not truncated):
+SELECT
+    min(length(tags)) AS min_len,
+    avg(length(tags))::int AS avg_len,
+    max(length(tags)) AS max_len,
+    count(*) FILTER (WHERE length(tags) > 2000) AS over_2000_bytes
+FROM fd_long_tags
+WHERE tags IS NOT NULL;
+ min_len | avg_len | max_len | over_2000_bytes 
+---------+---------+---------+-----------------
+     245 |    1695 |    3499 |            2472
+(1 row)
+
+-- Per-segment distinct counts:
+SELECT host, metric, count(DISTINCT tags) AS distinct_tags, count(*) AS rows
+FROM fd_long_tags
+GROUP BY host, metric
+ORDER BY host, metric;
+ host |   metric   | distinct_tags | rows 
+------+------------+---------------+------
+ srv1 | containers |            30 | 2500
+ srv1 | requests   |            15 | 1800
+ srv2 | containers |            25 | 2200
+ srv2 | sensors    |             0 |  700
+(4 rows)
+
+-- Batch sorted merge must work with TOAST-ed long-tag dictionaries:
+SELECT min(time), max(time) FROM fd_long_tags;
+          min           |          max           
+------------------------+------------------------
+ 2025-06-01 00:00:01+00 | 2025-06-01 00:41:40+00
+(1 row)
+
+SELECT time, host, metric, length(tags) AS tag_len
+FROM fd_long_tags ORDER BY time LIMIT 3;
+          time          | host |   metric   | tag_len 
+------------------------+------+------------+---------
+ 2025-06-01 00:00:01+00 | srv1 | containers |     739
+ 2025-06-01 00:00:01+00 | srv1 | requests   |     326
+ 2025-06-01 00:00:01+00 | srv2 | containers |     792
+(3 rows)
+
+SELECT time, host, metric, length(tags) AS tag_len
+FROM fd_long_tags ORDER BY time DESC LIMIT 3;
+          time          | host |   metric   | tag_len 
+------------------------+------+------------+---------
+ 2025-06-01 00:41:40+00 | srv1 | containers |    1673
+ 2025-06-01 00:41:39+00 | srv1 | containers |    1462
+ 2025-06-01 00:41:38+00 | srv1 | containers |    1372
+(3 rows)
+
+-- Cross-segment contamination: srv1 containers must not have srv2 content
+SELECT count(*) AS cross_contamination FROM fd_long_tags
+WHERE host = 'srv1' AND metric = 'containers'
+  AND (tags LIKE '%gcr.io%' OR tags LIKE '%gke-prod%' OR tags LIKE '%pod-%');
+ cross_contamination 
+---------------------
+                   0
+(1 row)
+
+-- srv2 containers must not have srv1 content
+SELECT count(*) AS cross_contamination FROM fd_long_tags
+WHERE host = 'srv2' AND metric = 'containers'
+  AND (tags LIKE '%registry.internal%' OR tags LIKE '%production-%');
+ cross_contamination 
+---------------------
+                   0
+(1 row)
+
+-- Spot-check a specific long value survived intact:
+SELECT length(tags) AS len, left(tags, 80) AS prefix, right(tags, 40) AS suffix
+FROM fd_long_tags
+WHERE host = 'srv1' AND metric = 'containers' AND value = 30
+LIMIT 1;
+ len |                                      prefix                                      |                  suffix                  
+-----+----------------------------------------------------------------------------------+------------------------------------------
+ 649 | ["container-0","image=registry.internal.corp/team-0/service-payment-gateway:v1.0 | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+(1 row)
+
+-- NULL-dict segment still works:
+SELECT count(*) AS total, count(tags) AS non_null
+FROM fd_long_tags WHERE metric = 'sensors';
+ total | non_null 
+-------+----------
+   700 |        0
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+RESET
+DROP TABLE fd_long_tags CASCADE;
+DROP TABLE
+DROP TABLE fd_long_tags_expected;
+DROP TABLE
+DROP TABLE fd_metrics CASCADE;
+DROP TABLE
+DROP TABLE fd_many CASCADE;
+DROP TABLE
+RESET max_parallel_workers_per_gather;
+RESET
 RESET enable_bitmapscan;
+RESET
 RESET enable_seqscan;
+RESET
 RESET timescaledb.enable_vectorized_aggregation;
+RESET

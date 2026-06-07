@@ -2050,8 +2050,6 @@ flat_dict_finalize_segment(RowCompressor *row_compressor, BulkWriter *writer)
 	{
 		int col = row_compressor->flat_dict_col_indexes[i];
 		FlatDictionaryBuilder *builder = row_compressor->flat_dict_builders[col];
-		elog(DEBUG1, "flat_dict_finalize_segment: builder col=%d next_index=%u (= dictionary cardinality)",
-			 col, flat_dictionary_builder_num_values(builder));
 		void *dict_blob = flat_dictionary_builder_finish(builder);
 
 		int16 compressed_col = row_compressor->uncompressed_col_to_compressed_col[col];

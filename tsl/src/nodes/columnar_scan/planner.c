@@ -1215,6 +1215,28 @@ columnar_scan_plan_create(PlannerInfo *root, RelOptInfo *rel, CustomPath *path,
 				   &uncompressed_attrs_needed);
 
 	/*
+	 * For flat_dictionary tables the executor's per-segment dictionary cache
+	 * keys on the segmentby column values.  Those columns must therefore
+	 * appear in the decompressed scan tuple (i.e. have a valid
+	 * custom_scan_attno) even when the user query does not reference them.
+	 * Add them to uncompressed_attrs_needed so that build_decompression_map
+	 * assigns a non-zero destination_attno and they flow through to the
+	 * executor's decompression context.
+	 */
+	if (dcpath->info->settings->fd.algorithm != NULL &&
+		ts_array_length(dcpath->info->settings->fd.algorithm) > 0 &&
+		dcpath->info->chunk_segmentby_attnos != NULL)
+	{
+		int attno = -1;
+		while ((attno = bms_next_member(dcpath->info->chunk_segmentby_attnos, attno)) >= 0)
+		{
+			uncompressed_attrs_needed =
+				bms_add_member(uncompressed_attrs_needed,
+							   attno - FirstLowInvalidHeapAttributeNumber);
+		}
+	}
+
+	/*
 	 * Determine which compressed column goes to which output column.
 	 */
 	DecompressionMapContext context = { .root = root,

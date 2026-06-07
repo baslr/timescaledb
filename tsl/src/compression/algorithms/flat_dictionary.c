@@ -77,8 +77,6 @@ flat_dictionary_context_from_array_blob(Datum array_blob, Oid element_type, Memo
 		ArrowArray *dict_arrow = decompress_all_fn(array_blob, element_type, dest_mctx);
 
 		num_values = dict_arrow->length;
-		elog(DEBUG1, "flat_dictionary_context_from_array_blob: num_values=%u, null_count=%ld",
-			 num_values, dict_arrow->null_count);
 		values = palloc(sizeof(Datum) * num_values);
 
 		if (typlen == -1)
