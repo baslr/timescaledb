@@ -1,0 +1,255 @@
+-- This file and its contents are licensed under the Timescale License.
+-- Please see the included NOTICE for copyright information and
+-- LICENSE-TIMESCALE for a copy of the license.
+
+-- Regression test: standard compression (no flat_dictionary) with long tags,
+-- multiple segments, and varying cardinalities. Mirrors the flat_dict tests
+-- to ensure the default dictionary algorithm handles the same workloads.
+
+SET timezone TO 'UTC';
+
+CREATE TABLE std_long_tags(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    value float NOT NULL,
+    tags text
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 hour',
+    tsdb.segmentby = 'host,metric',
+    tsdb.orderby = 'time desc'
+);
+
+CREATE TABLE std_long_tags_expected(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    value float NOT NULL,
+    tags text
+);
+
+-- Host alpha: containers (30 distinct tags, 800-2500 bytes, 2100 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'containers',
+       1000000 + g,
+       '["container-' || (g % 30) || '",'
+       || '"image=registry.internal.corp/team-' || (g % 30) || '/service-'
+       || (CASE (g % 30) / 5
+           WHEN 0 THEN 'payment-gateway'
+           WHEN 1 THEN 'user-authentication'
+           WHEN 2 THEN 'order-processing'
+           WHEN 3 THEN 'inventory-management'
+           WHEN 4 THEN 'notification-service'
+           ELSE 'analytics-pipeline'
+       END)
+       || ':v1.' || (g % 30) || '.0",'
+       || '"namespace=production-' || (CASE g % 30
+           WHEN 0 THEN 'us-east-1' WHEN 1 THEN 'us-west-2' WHEN 2 THEN 'eu-central-1'
+           WHEN 3 THEN 'ap-southeast-1' WHEN 4 THEN 'eu-west-1'
+           ELSE 'region-' || (g % 30)
+       END) || '",'
+       || '"labels=' || repeat('k' || (g % 30)::text || '=v' || (g % 30)::text || ',',
+                                20 + (g % 30) * 2) || '",'
+       || '"env=' || repeat('ENV_VAR_' || (g % 30)::text || '=value_' || (g % 30)::text || ';',
+                            10 + (g % 30)) || '",'
+       || '"annotations=' || repeat('a', 200 + (g % 30) * 60) || '"]'
+FROM generate_series(1, 2100) g;
+
+-- Host alpha: requests (15 distinct tags, 400-1200 bytes, 1500 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'requests',
+       1010000 + g,
+       '["endpoint=/api/v2/' || (CASE g % 15
+           WHEN 0 THEN 'users/profile/settings'
+           WHEN 1 THEN 'orders/checkout/confirm'
+           WHEN 2 THEN 'products/search/results'
+           WHEN 3 THEN 'inventory/warehouses/stock'
+           WHEN 4 THEN 'notifications/push/batch'
+           WHEN 5 THEN 'analytics/reports/daily'
+           WHEN 6 THEN 'auth/oauth2/token/refresh'
+           WHEN 7 THEN 'billing/invoices/generate'
+           WHEN 8 THEN 'shipping/tracking/updates'
+           WHEN 9 THEN 'support/tickets/create'
+           WHEN 10 THEN 'media/uploads/process'
+           WHEN 11 THEN 'cache/invalidate/pattern'
+           WHEN 12 THEN 'webhooks/delivery/retry'
+           WHEN 13 THEN 'config/features/toggle'
+           ELSE 'health/deep/dependencies'
+       END) || '?session_id=' || repeat('s', 100 + (g % 15) * 50)
+       || '&trace_id=' || repeat('t', 80 + (g % 15) * 30) || '"]'
+FROM generate_series(1, 1500) g;
+
+-- Host alpha: process (23 distinct tags, 200-500 bytes, 2300 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'process',
+       1020000 + g,
+       '["' || (CASE g % 23
+           WHEN 0 THEN 'systemd' WHEN 1 THEN 'sshd' WHEN 2 THEN 'postgres'
+           WHEN 3 THEN 'node_exporter' WHEN 4 THEN 'prometheus'
+           WHEN 5 THEN 'grafana-server' WHEN 6 THEN 'alertmanager'
+           WHEN 7 THEN 'nginx' WHEN 8 THEN 'redis-server' WHEN 9 THEN 'mongod'
+           WHEN 10 THEN 'kubelet' WHEN 11 THEN 'containerd' WHEN 12 THEN 'dockerd'
+           WHEN 13 THEN 'etcd' WHEN 14 THEN 'coredns'
+           WHEN 15 THEN 'kube-apiserver' WHEN 16 THEN 'kube-scheduler'
+           WHEN 17 THEN 'kube-proxy' WHEN 18 THEN 'fluentd'
+           WHEN 19 THEN 'elasticsearch' WHEN 20 THEN 'kibana'
+           WHEN 21 THEN 'logstash' ELSE 'java-app-service-worker'
+       END) || '","cpu_seconds","' || repeat('p', 100 + (g % 300)) || '"]'
+FROM generate_series(1, 2300) g;
+
+-- Host alpha: temperature (NULL tags, 500 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'alpha', 'temperature', 1030000 + g, NULL
+FROM generate_series(1, 500) g;
+
+-- Host bravo: containers (25 distinct tags, 1000-2500 bytes, 2200 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'containers',
+       2000000 + g,
+       '["pod-' || (g % 25) || '",'
+       || '"image=gcr.io/project-' || (g % 25) || '/microservice-'
+       || (CASE (g % 25) / 5
+           WHEN 0 THEN 'data-ingestion'
+           WHEN 1 THEN 'stream-processor'
+           WHEN 2 THEN 'model-serving'
+           WHEN 3 THEN 'feature-store'
+           ELSE 'batch-scheduler'
+       END)
+       || ':release-' || (g % 25) || '",'
+       || '"cluster=gke-prod-' || (CASE g % 25
+           WHEN 0 THEN 'us-central1-a' WHEN 1 THEN 'us-central1-b'
+           WHEN 2 THEN 'europe-west4-a' WHEN 3 THEN 'asia-east1-b'
+           ELSE 'zone-' || (g % 25)
+       END) || '",'
+       || '"resources=' || repeat('cpu=' || (g % 25)::text || 'm,mem=' || (g % 25 * 128)::text || 'Mi,',
+                                  15 + (g % 25) * 2) || '",'
+       || '"tolerations=' || repeat('T', 300 + (g % 25) * 70) || '"]'
+FROM generate_series(1, 2200) g;
+
+-- Host bravo: disk_io (13 distinct tags, 120-300 bytes, 1800 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'disk_io',
+       2010000 + g,
+       '["' || (CASE g % 13
+           WHEN 0 THEN 'sda' WHEN 1 THEN 'sdb' WHEN 2 THEN 'sdc' WHEN 3 THEN 'sdd'
+           WHEN 4 THEN 'nvme0n1' WHEN 5 THEN 'nvme1n1' WHEN 6 THEN 'nvme2n1'
+           WHEN 7 THEN 'dm-0' WHEN 8 THEN 'dm-1' WHEN 9 THEN 'dm-2'
+           WHEN 10 THEN 'dm-3' WHEN 11 THEN 'md0' ELSE 'md1'
+       END) || '","iops","' || repeat('b', 60 + (g % 180)) || '"]'
+FROM generate_series(1, 1800) g;
+
+-- Host bravo: temperature (NULL tags, 800 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'bravo', 'temperature', 2020000 + g, NULL
+FROM generate_series(1, 800) g;
+
+-- Host charlie: containers (5 distinct tags, 100-250 bytes, 1000 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'charlie', 'containers',
+       3000000 + g,
+       '["' || (CASE g % 5
+           WHEN 0 THEN '/dev/vda' WHEN 1 THEN '/dev/vda1' WHEN 2 THEN '/dev/vda2'
+           WHEN 3 THEN '/dev/vdb' ELSE '/dev/vdb1'
+       END) || '","latency_us","' || repeat('c', 40 + (g % 100)) || '"]'
+FROM generate_series(1, 1000) g;
+
+-- Host charlie: temperature (NULL tags, 600 rows)
+INSERT INTO std_long_tags
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'charlie', 'temperature', 3010000 + g, NULL
+FROM generate_series(1, 600) g;
+
+-- Copy before compression
+INSERT INTO std_long_tags_expected SELECT * FROM std_long_tags;
+
+-- Verify long tags exist before compression:
+SELECT
+    min(length(tags)) AS min_len,
+    avg(length(tags))::int AS avg_len,
+    max(length(tags)) AS max_len,
+    count(*) FILTER (WHERE length(tags) > 2000) AS over_2000
+FROM std_long_tags WHERE tags IS NOT NULL;
+
+-- Compress
+SELECT count(compress_chunk(ch)) FROM show_chunks('std_long_tags') ch;
+
+SET max_parallel_workers_per_gather = 0;
+
+--------------------------------------------------------------------------------
+-- Full round-trip: compressed data must exactly match the reference table.
+--------------------------------------------------------------------------------
+SELECT
+    (SELECT count(*) FROM std_long_tags) AS compressed_count,
+    (SELECT count(*) FROM std_long_tags_expected) AS expected_count;
+
+SELECT count(*) AS mismatched_rows FROM (
+    (SELECT time, host, metric, value, tags FROM std_long_tags
+     EXCEPT
+     SELECT time, host, metric, value, tags FROM std_long_tags_expected)
+    UNION ALL
+    (SELECT time, host, metric, value, tags FROM std_long_tags_expected
+     EXCEPT
+     SELECT time, host, metric, value, tags FROM std_long_tags)
+) diff;
+
+-- Tag lengths must survive compression:
+SELECT
+    min(length(tags)) AS min_len,
+    avg(length(tags))::int AS avg_len,
+    max(length(tags)) AS max_len,
+    count(*) FILTER (WHERE length(tags) > 2000) AS over_2000
+FROM std_long_tags WHERE tags IS NOT NULL;
+
+-- Per-segment distinct counts:
+SELECT host, metric, count(DISTINCT tags) AS distinct_tags, count(*) AS rows
+FROM std_long_tags
+GROUP BY host, metric
+ORDER BY host, metric;
+
+-- NULL-tags segments must be intact:
+SELECT host, count(*) AS total, count(tags) AS non_null
+FROM std_long_tags WHERE metric = 'temperature'
+GROUP BY host ORDER BY host;
+
+-- Batch sorted merge (min/max):
+SELECT min(time), max(time) FROM std_long_tags;
+
+SELECT time, host, metric, length(tags) AS tag_len
+FROM std_long_tags ORDER BY time LIMIT 3;
+
+SELECT time, host, metric, length(tags) AS tag_len
+FROM std_long_tags ORDER BY time DESC LIMIT 3;
+
+-- Cross-contamination:
+SELECT count(*) AS cross_contamination FROM std_long_tags
+WHERE host = 'alpha' AND metric = 'containers'
+  AND (tags LIKE '%gcr.io%' OR tags LIKE '%gke-prod%');
+
+SELECT count(*) AS cross_contamination FROM std_long_tags
+WHERE host = 'bravo' AND metric = 'containers'
+  AND (tags LIKE '%registry.internal%' OR tags LIKE '%production-%');
+
+-- Spot-check a long value:
+SELECT length(tags) AS len, left(tags, 80) AS prefix, right(tags, 40) AS suffix
+FROM std_long_tags
+WHERE host = 'alpha' AND metric = 'containers' AND value = 1000030
+LIMIT 1;
+
+-- Queries without segmentby in SELECT:
+SELECT count(tags) AS non_null_count FROM std_long_tags;
+SELECT count(DISTINCT tags) AS distinct_tags FROM std_long_tags;
+
+RESET max_parallel_workers_per_gather;
+
+DROP TABLE std_long_tags CASCADE;
+DROP TABLE std_long_tags_expected;
