@@ -4,7 +4,7 @@
 # Pin PG_VERSION to major + distro. Patches roll in on rebuild.
 # Update when you want a new PostgreSQL major.
 
-ARG PG_VERSION=17-bookworm
+ARG PG_VERSION=17-trixie
 
 # ==============================================================================
 # Stage 1: Builder — uses the same postgres image to guarantee matching libs
