@@ -298,21 +298,19 @@ flat_dict_cache_insert(FlatDictCache *cache, TupleTableSlot *compressed_slot,
 }
 
 void
-flat_dict_cache_prefetch(FlatDictCache *cache, Oid chunk_relid, MemoryContext dict_mctx)
+flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_relid,
+						 MemoryContext dict_mctx)
 {
-	Chunk *chunk = ts_chunk_get_by_relid(chunk_relid, /* fail_if_not_found = */ false);
-	if (chunk == NULL || chunk->fd.compressed_chunk_id == INVALID_CHUNK_ID)
-	{
-		/* Not a compressed chunk (should not happen on this path) — nothing to do. */
-		return;
-	}
-
-	Chunk *compressed_chunk =
-		ts_chunk_get_by_id(chunk->fd.compressed_chunk_id, /* fail_if_not_found = */ false);
-	if (compressed_chunk == NULL)
+	if (!OidIsValid(compressed_rel_id))
 		return;
 
-	Relation comp_rel = table_open(compressed_chunk->table_id, AccessShareLock);
+	/*
+	 * Open with NoLock: the executor already holds AccessShareLock on both
+	 * relations (acquired by the leader before parallel workers start).
+	 * Requesting a lock here would require a transaction ID, which is
+	 * forbidden in parallel workers.
+	 */
+	Relation comp_rel = table_open(compressed_rel_id, NoLock);
 
 	/*
 	 * Resolve the physical attribute numbers of the segmentby columns in this
@@ -355,7 +353,7 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid chunk_relid, MemoryContext di
 	 * dictionary into CurrentMemoryContext, so switch to the scan-lifetime
 	 * dict_mctx for the duration.
 	 */
-	Relation uncompressed_rel = table_open(chunk_relid, AccessShareLock);
+	Relation uncompressed_rel = table_open(chunk_relid, NoLock);
 	MemoryContext old = MemoryContextSwitchTo(dict_mctx);
 	RowDecompressor decompressor =
 		build_decompressor(RelationGetDescr(comp_rel), RelationGetDescr(uncompressed_rel));
@@ -413,6 +411,6 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid chunk_relid, MemoryContext di
 	row_decompressor_close(&decompressor);
 	MemoryContextSwitchTo(old);
 
-	table_close(uncompressed_rel, AccessShareLock);
-	table_close(comp_rel, AccessShareLock);
+	table_close(uncompressed_rel, NoLock);
+	table_close(comp_rel, NoLock);
 }

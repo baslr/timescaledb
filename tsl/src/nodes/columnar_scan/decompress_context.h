@@ -127,6 +127,13 @@ typedef struct DecompressContext
 	Oid chunk_relid;
 
 	/*
+	 * Oid of the compressed chunk relation's table. Stored here so the
+	 * flat_dict prefetch can open it directly without catalog lookups that
+	 * would require a transaction ID (forbidden in parallel workers).
+	 */
+	Oid compressed_rel_id;
+
+	/*
 	 * True if this scan's table has at least one flat_dictionary column. Set at
 	 * exec init from the compression settings. Gates the per-batch dictionary
 	 * resolution so non-flat_dictionary scans pay nothing.

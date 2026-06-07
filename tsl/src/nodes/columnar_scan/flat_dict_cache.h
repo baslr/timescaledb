@@ -86,13 +86,17 @@ extern void flat_dict_cache_insert(FlatDictCache *cache, TupleTableSlot *compres
 								   FlatDictionaryContext *ctx);
 
 /*
- * One-shot prefetch: scan the compressed chunk of chunk_relid and load every
- * flat_dictionary dictionary row (_ts_meta_count == 0) into the cache, keyed by
- * its segmentby values. Used by the reordered read modes (reverse / batch
- * sorted merge / compressed sort) where a data batch can be reached before its
- * dictionary row. Idempotent and cheap to call once: the compressed chunk holds
- * only one small dictionary row per segment. dict_mctx is where the
- * dictionaries are materialized (a scan-lifetime context).
+ * One-shot prefetch: scan the compressed chunk and load every flat_dictionary
+ * dictionary row (_ts_meta_count == 0) into the cache, keyed by its segmentby
+ * values. Used by the reordered read modes (reverse / batch sorted merge /
+ * compressed sort) and parallel scans where a data batch can be reached before
+ * its dictionary row.
+ *
+ * compressed_rel_id is the OID of the compressed chunk's table (resolved at
+ * exec init time, avoiding catalog lookups that require a transaction ID and
+ * are forbidden in parallel workers). chunk_relid is the uncompressed chunk
+ * (needed for its tuple descriptor). dict_mctx is where the dictionaries are
+ * materialized (a scan-lifetime context).
  */
-extern void flat_dict_cache_prefetch(FlatDictCache *cache, Oid chunk_relid,
-									 MemoryContext dict_mctx);
+extern void flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id,
+									 Oid chunk_relid, MemoryContext dict_mctx);

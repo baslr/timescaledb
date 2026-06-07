@@ -1099,7 +1099,8 @@ compressed_batch_resolve_flat_dict(DecompressContext *dcontext,
 	{
 		/* Reordered read reached a data batch before its dictionary row. */
 		MemoryContext dict_mctx = MemoryContextGetParent(batch_state->per_batch_context);
-		flat_dict_cache_prefetch(dcontext->flat_dict_cache, dcontext->chunk_relid, dict_mctx);
+		flat_dict_cache_prefetch(dcontext->flat_dict_cache, dcontext->compressed_rel_id,
+							dcontext->chunk_relid, dict_mctx);
 		ctx = flat_dict_cache_lookup(dcontext->flat_dict_cache, compressed_slot);
 	}
 

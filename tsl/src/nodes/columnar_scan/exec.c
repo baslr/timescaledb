@@ -292,6 +292,7 @@ columnar_scan_begin(CustomScanState *node, EState *estate, int eflags)
 	 * dictionary resolution so non-flat_dictionary scans pay nothing.
 	 */
 	dcontext->chunk_relid = chunk_state->chunk_relid;
+	dcontext->compressed_rel_id = InvalidOid;
 	dcontext->flat_dict_cache = NULL;
 	dcontext->has_flat_dict_columns = false;
 	{
@@ -300,6 +301,7 @@ columnar_scan_begin(CustomScanState *node, EState *estate, int eflags)
 			ts_array_length(settings->fd.algorithm) > 0)
 		{
 			dcontext->has_flat_dict_columns = true;
+			dcontext->compressed_rel_id = settings->fd.compress_relid;
 		}
 	}
 
