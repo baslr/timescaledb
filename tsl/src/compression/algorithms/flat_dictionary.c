@@ -663,8 +663,14 @@ ArrowArray *
 flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
                                FlatDictionaryContext *ctx, MemoryContext dest_mctx)
 {
+	/*
+	 * The caller (decompress_column) has already detoasted compressed_data
+	 * into per_batch_context. We skip PG_DETOAST_DATUM because the current
+	 * memory context is bulk_decompression_context (which is reset after we
+	 * return), and the datum is already a flat 4B-header varlena.
+	 */
 	const FlatDictionaryCompressed *header =
-		(const FlatDictionaryCompressed *) PG_DETOAST_DATUM(compressed_data);
+		(const FlatDictionaryCompressed *) DatumGetPointer(compressed_data);
 
 	Assert(header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY);
 
@@ -673,55 +679,72 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(dest_mctx);
 
-	/*
-	 * If ctx is NULL, this is an all-NULL segment (no dictionary exists).
-	 * Every row in the batch must be NULL. Produce an all-NULL ArrowArray.
-	 */
-	if (ctx == NULL)
-	{
-		ArrowArray *result = palloc0(sizeof(ArrowArray));
-		result->length = n;
-		result->null_count = n;
-		result->n_buffers = 3;
-		result->buffers = palloc0(sizeof(void *) * 3);
-		/* validity bitmap: all zeros = all NULL */
-		result->buffers[0] = palloc0(sizeof(uint64) * ((n + 63) / 64));
-		/* offsets: all zero (no data) */
-		result->buffers[1] = palloc0(pad_to_multiple(64, sizeof(uint32) * (n + 1)));
-		/* empty data buffer */
-		result->buffers[2] = palloc(64);
-		MemoryContextSwitchTo(old_ctx);
-		return result;
-	}
-
-	/*
-	 * For TEXT types, we build an ArrowArray with dictionary encoding:
-	 * the dictionary buffer + index array. For now, fall back to the
-	 * iterator-based approach by resolving all values.
-	 *
-	 * TODO: Native Arrow dictionary encoding for zero-copy vectorized scans.
-	 * For the initial implementation, we resolve indexes to Datums.
-	 */
-
-	/* Allocate Arrow buffers */
 	ArrowArray *result = palloc0(sizeof(ArrowArray));
 	result->length = n;
 	result->null_count = 0;
-	result->n_buffers = 2; /* validity + offsets/data */
 
-	/* For TEXT: offsets (int32[n+1]) + data buffer */
 	int16 typlen;
 	bool typbyval;
-	char typalign;
-	get_typlenbyvalalign(element_type, &typlen, &typbyval, &typalign);
+	get_typlenbyval(element_type, &typlen, &typbyval);
 
 	if (typlen == -1)
 	{
-		/* Variable-length type (TEXT, BYTEA, etc.) */
+		/*
+		 * Variable-length type (TEXT). Produce a dictionary-encoded Arrow:
+		 * result->dictionary holds the distinct values as a flat text Arrow,
+		 * result->buffers[1] holds int16 indexes mapping each row to its
+		 * dictionary entry. This avoids materializing a large flat data buffer
+		 * (which triggers a pre-existing ColumnarScan bug with GenerationContext)
+		 * and naturally matches flat_dict's compression model.
+		 */
 
-		/* Decode nulls bitmap upfront (needed for both size and data passes) */
+		/* Build dictionary Arrow from ctx->values[] */
+		if (ctx == NULL)
+		{
+			/* All-NULL segment: produce an all-NULL result */
+			result->null_count = n;
+			result->n_buffers = 2;
+			result->buffers = palloc0(sizeof(void *) * 2);
+			result->buffers[0] = palloc0(sizeof(uint64) * ((n + 63) / 64));
+			result->buffers[1] = palloc0(pad_to_multiple(64, sizeof(int16) * n));
+			MemoryContextSwitchTo(old_ctx);
+			return result;
+		}
+
+		ArrowArray *dict_arrow = palloc0(sizeof(ArrowArray));
+		dict_arrow->length = ctx->num_values;
+		dict_arrow->null_count = 0;
+		dict_arrow->n_buffers = 3;
+
+		/* Compute dictionary data size */
+		Size dict_data_size = 0;
+		for (uint32 d = 0; d < ctx->num_values; d++)
+			dict_data_size += VARSIZE_ANY_EXHDR(DatumGetPointer(ctx->values[d]));
+
+		uint32 *dict_offsets =
+			(uint32 *) palloc(pad_to_multiple(64, sizeof(uint32) * (ctx->num_values + 1)));
+		char *dict_data = palloc(pad_to_multiple(64, dict_data_size + 1));
+
+		uint32 dict_off = 0;
+		dict_offsets[0] = 0;
+		for (uint32 d = 0; d < ctx->num_values; d++)
+		{
+			Size len = VARSIZE_ANY_EXHDR(DatumGetPointer(ctx->values[d]));
+			memcpy(dict_data + dict_off, VARDATA_ANY(DatumGetPointer(ctx->values[d])), len);
+			dict_off += len;
+			dict_offsets[d + 1] = dict_off;
+		}
+
+		dict_arrow->buffers = palloc(sizeof(void *) * 3);
+		dict_arrow->buffers[0] = NULL; /* dictionary has no NULLs */
+		dict_arrow->buffers[1] = dict_offsets;
+		dict_arrow->buffers[2] = dict_data;
+
+		/* Build int16 index array and validity bitmap for the batch rows */
+		int16 *indexes = (int16 *) palloc(pad_to_multiple(64, sizeof(int16) * n));
+		uint8 *validity = NULL;
 		bool has_nulls = header->has_nulls;
-		bool *null_flags = NULL;
+
 		if (has_nulls)
 		{
 			Size idx_data_size = (Size) n * header->index_width;
@@ -734,139 +757,49 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type,
 			Simple8bRleSerialized *ns = bytes_deserialize_simple8b_and_advance(&si);
 			Simple8bRleDecompressionIterator nulls_iter;
 			simple8brle_decompression_iterator_init_forward(&nulls_iter, ns);
-			null_flags = palloc(sizeof(bool) * n);
+			validity = palloc0(sizeof(uint64) * ((n + 63) / 64));
+
 			for (uint16 i = 0; i < n; i++)
 			{
 				Simple8bRleDecompressResult nr =
 					simple8brle_decompression_iterator_try_next_forward(&nulls_iter);
-				null_flags[i] = (nr.val == 1);
+				if (nr.val == 1)
+				{
+					indexes[i] = 0;
+					result->null_count++;
+				}
+				else
+				{
+					uint32 idx = flat_dict_read_index(index_data, header->index_width, i);
+					Assert(idx < ctx->num_values);
+					Assert(idx <= INT16_MAX);
+					indexes[i] = (int16) idx;
+					validity[i / 8] |= (1 << (i % 8));
+				}
 			}
 		}
-
-		/* Compute total data size (skip NULLs — their index slot is garbage) */
-		Size total_data_size = 0;
-		for (uint16 i = 0; i < n; i++)
+		else
 		{
-			if (null_flags && null_flags[i])
-				continue;
-			uint32 idx = flat_dict_read_index(index_data, header->index_width, i);
-			Assert(idx < ctx->num_values);
-			Datum val = ctx->values[idx];
-			total_data_size += VARSIZE_ANY_EXHDR(DatumGetPointer(val));
-		}
-
-		/*
-		 * Match the Arrow text layout produced by array.c: uint32 offsets (the
-		 * contract the consumers read, e.g. get_max_varlena_bytes) and buffers
-		 * padded to a 64-byte multiple so vectorized/SIMD consumers can read in
-		 * full words without running past the allocation.
-		 */
-		uint32 *offsets =
-			(uint32 *) palloc(pad_to_multiple(64, sizeof(uint32) * (n + 1)));
-		char *data_buf = palloc(pad_to_multiple(64, total_data_size + 1));
-		uint8 *validity = NULL;
-
-		if (has_nulls)
-		{
-			validity = palloc0(sizeof(uint64) * ((n + 63) / 64));
-		}
-
-		uint32 offset = 0;
-		offsets[0] = 0;
-		for (uint16 i = 0; i < n; i++)
-		{
-			bool is_null = (null_flags && null_flags[i]);
-
-			if (is_null)
-			{
-				offsets[i + 1] = offset;
-				result->null_count++;
-				/* validity bit stays 0 (null) */
-			}
-			else
+			for (uint16 i = 0; i < n; i++)
 			{
 				uint32 idx = flat_dict_read_index(index_data, header->index_width, i);
 				Assert(idx < ctx->num_values);
-				Datum val = ctx->values[idx];
-				Size len = VARSIZE_ANY_EXHDR(DatumGetPointer(val));
-				memcpy(data_buf + offset, VARDATA_ANY(DatumGetPointer(val)), len);
-				offset += len;
-				offsets[i + 1] = offset;
-				if (validity)
-					validity[i / 8] |= (1 << (i % 8));
+				Assert(idx <= INT16_MAX);
+				indexes[i] = (int16) idx;
 			}
 		}
 
-		if (null_flags)
-			pfree(null_flags);
-
-		result->buffers = palloc(sizeof(void *) * 3);
+		result->n_buffers = 2;
+		result->buffers = palloc(sizeof(void *) * 2);
 		result->buffers[0] = validity;
-		result->buffers[1] = offsets;
-		result->buffers[2] = data_buf;
-		result->n_buffers = 3;
+		result->buffers[1] = indexes;
+		result->dictionary = dict_arrow;
 	}
 	else
 	{
-		/* Fixed-length type. Pad to a 64-byte multiple for SIMD consumers. */
-		char *data_buf = palloc(pad_to_multiple(64, (Size) typlen * n));
-		uint8 *validity = NULL;
-		bool has_nulls = header->has_nulls;
-
-		Simple8bRleDecompressionIterator nulls_iter;
-		if (has_nulls)
-		{
-			Size idx_data_size = (Size) n * header->index_width;
-			const char *nulls_data = index_data + idx_data_size;
-			StringInfoData si;
-			si.data = (char *) nulls_data;
-			si.len = VARSIZE(header) - sizeof(FlatDictionaryCompressed) - idx_data_size;
-			si.cursor = 0;
-			si.maxlen = si.len;
-			Simple8bRleSerialized *ns = bytes_deserialize_simple8b_and_advance(&si);
-			simple8brle_decompression_iterator_init_forward(&nulls_iter, ns);
-			/*
-			 * The validity bitmap is read by consumers a uint64 word at a time
-			 * (arrow_row_is_valid / the vectorized qual loop), so it must be
-			 * allocated as a whole number of 64-bit words — not (n+7)/8 bytes,
-			 * which would let the last word read past the allocation.
-			 */
-			validity = palloc0(sizeof(uint64) * ((n + 63) / 64));
-		}
-
-		for (uint16 i = 0; i < n; i++)
-		{
-			bool is_null = false;
-			if (has_nulls)
-			{
-				Simple8bRleDecompressResult nr =
-					simple8brle_decompression_iterator_try_next_forward(&nulls_iter);
-				is_null = (nr.val == 1);
-			}
-
-			if (is_null)
-			{
-				memset(data_buf + (typlen * i), 0, typlen);
-				result->null_count++;
-			}
-			else
-			{
-				uint32 idx = flat_dict_read_index(index_data, header->index_width, i);
-				Assert(idx < ctx->num_values);
-				Datum val = ctx->values[idx];
-				if (typbyval)
-					store_att_byval(data_buf + (typlen * i), val, typlen);
-				else
-					memcpy(data_buf + (typlen * i), DatumGetPointer(val), typlen);
-				if (validity)
-					validity[i / 8] |= (1 << (i % 8));
-			}
-		}
-
-		result->buffers = palloc(sizeof(void *) * 2);
-		result->buffers[0] = validity;
-		result->buffers[1] = data_buf;
-		result->n_buffers = 2;
+		/* Fixed-length type — unlikely for flat_dict but handle for completeness */
+		MemoryContextSwitchTo(old_ctx);
+		return NULL; /* fall back to iterator */
 	}
 
 	MemoryContextSwitchTo(old_ctx);

@@ -993,6 +993,106 @@ decompress_batches_scan(Relation in_rel, Relation out_rel, Relation index_rel, S
 				row_decompressor_reset(&decompressor);
 				continue;
 			}
+
+			/*
+			 * Data row encountered but no dictionary loaded yet. This happens
+			 * when the index scan returns data rows before dictionary rows
+			 * (dictionary rows have NULL metadata min/max which sort last in
+			 * the compressed chunk index). We need to find and load the
+			 * dictionary row for the current segment before we can decompress.
+			 *
+			 * Do a supplementary sequential scan of the compressed relation to
+			 * find the dictionary row (meta_count = 0) that shares the same
+			 * segmentby column values as the current data row. We use a
+			 * separate decompressor to avoid corrupting the main one's state.
+			 */
+			if (decompressor.flat_dict_ctx == NULL)
+			{
+				int natts = decompressor.in_desc->natts;
+				Datum *dict_datums = palloc(sizeof(Datum) * natts);
+				bool *dict_nulls = palloc(sizeof(bool) * natts);
+				TableScanDesc dict_scan =
+					table_beginscan(in_rel, GetActiveSnapshot(), 0, NULL);
+				TupleTableSlot *dict_slot = table_slot_create(in_rel, NULL);
+
+				while (table_scan_getnextslot(dict_scan, ForwardScanDirection, dict_slot))
+				{
+					bool should_free_dict;
+					HeapTuple dict_tuple =
+						ExecFetchSlotHeapTuple(dict_slot, false, &should_free_dict);
+
+					heap_deform_tuple(dict_tuple,
+									  decompressor.in_desc,
+									  dict_datums,
+									  dict_nulls);
+
+					if (should_free_dict)
+						heap_freetuple(dict_tuple);
+
+					int32 dict_meta_count = DatumGetInt32(
+						dict_datums[AttrNumberGetAttrOffset(meta_count_attno)]);
+
+					if (dict_meta_count != 0)
+						continue;
+
+					/*
+					 * Found a dictionary row. Verify it belongs to the same
+					 * segment by comparing segmentby column values.
+					 */
+					bool segment_matches = true;
+					for (int col = 0; col < natts; col++)
+					{
+						PerCompressedColumn *column_info =
+							&decompressor.per_compressed_cols[col];
+						if (column_info->decompressed_column_offset < 0)
+							continue;
+						if (column_info->is_compressed)
+							continue;
+
+						/* This is a segmentby column — compare values */
+						if (decompressor.compressed_is_nulls[col] != dict_nulls[col])
+						{
+							segment_matches = false;
+							break;
+						}
+						if (!decompressor.compressed_is_nulls[col] && !dict_nulls[col])
+						{
+							Form_pg_attribute attr =
+								TupleDescAttr(decompressor.in_desc, col);
+							if (!datumIsEqual(decompressor.compressed_datums[col],
+											  dict_datums[col],
+											  attr->attbyval,
+											  attr->attlen))
+							{
+								segment_matches = false;
+								break;
+							}
+						}
+					}
+
+					if (segment_matches)
+					{
+						/*
+						 * Load dictionary from the separate dict_datums.
+						 * Temporarily swap them into the decompressor, load,
+						 * and restore the data row.
+						 */
+						Datum *data_datums = decompressor.compressed_datums;
+						bool *data_nulls = decompressor.compressed_is_nulls;
+						decompressor.compressed_datums = dict_datums;
+						decompressor.compressed_is_nulls = dict_nulls;
+						flat_dict_decompress_load_dictionary(&decompressor);
+						decompressor.compressed_datums = data_datums;
+						decompressor.compressed_is_nulls = data_nulls;
+						break;
+					}
+				}
+
+				ExecDropSingleTupleTableSlot(dict_slot);
+				table_endscan(dict_scan);
+				pfree(dict_datums);
+				pfree(dict_nulls);
+			}
 		}
 
 		/* Bloom pre-filtering for UPSERT conflict detection */

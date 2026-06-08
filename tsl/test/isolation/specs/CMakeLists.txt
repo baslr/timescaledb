@@ -54,6 +54,7 @@ if(CMAKE_BUILD_TYPE MATCHES Debug)
     split_chunk_concurrent.spec
     freeze_chunk.spec
     compression_dml_iso.spec
+    compression_flat_dict_concurrent.spec
     # These tests are using markers for the isolation tests (to avoid race
     # conditions causing differing output), which were added after 13.3 and in
     # all later major versions.
