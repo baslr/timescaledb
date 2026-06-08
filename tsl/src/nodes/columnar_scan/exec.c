@@ -397,6 +397,43 @@ columnar_scan_begin(CustomScanState *node, EState *estate, int eflags)
 	Assert(current_not_compressed == num_columns_with_metadata);
 
 	/*
+	 * Refine has_flat_dict_columns: only keep it true if at least one
+	 * COMPRESSED_COLUMN in the scan output actually uses flat_dictionary.
+	 * Without this, queries that only select segmentby/orderby columns from a
+	 * table that has a flat_dictionary column elsewhere would still trigger
+	 * dictionary resolution — the prefetch loads dictionaries keyed by
+	 * segmentby values, but the inline forward-scan loader
+	 * (compressed_batch_load_flat_dict) only sees columns in the scan output.
+	 * In reordered scans (IndexScan on segmentby where dict rows sort last),
+	 * data batches arrive before their dictionary row and the resolve fails.
+	 */
+	if (dcontext->has_flat_dict_columns)
+	{
+		bool found_flat_dict_in_scan = false;
+		CompressionSettings *fd_settings =
+			ts_compression_settings_get(chunk_state->chunk_relid);
+		if (fd_settings != NULL)
+		{
+			for (int i = 0; i < num_data_columns; i++)
+			{
+				CompressionColumnDescription *cd = &dcontext->compressed_chunk_columns[i];
+				if (cd->type != COMPRESSED_COLUMN)
+					continue;
+				const char *colname =
+					get_attname(dcontext->chunk_relid, cd->uncompressed_chunk_attno, false);
+				if (flat_dict_algo_for_column(fd_settings, colname) ==
+					COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+				{
+					found_flat_dict_in_scan = true;
+					break;
+				}
+			}
+		}
+		if (!found_flat_dict_in_scan)
+			dcontext->has_flat_dict_columns = false;
+	}
+
+	/*
 	 * Choose which batch queue we are going to use: heap for batch sorted
 	 * merge, and one-element FIFO for normal decompression.
 	 */

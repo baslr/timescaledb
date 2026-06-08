@@ -103,7 +103,7 @@ compression_get_algorithm_name(CompressionAlgorithm alg)
  * override. The column-name match is case-sensitive (the stored name is the
  * canonical attribute name).
  */
-static CompressionAlgorithm
+CompressionAlgorithm
 flat_dict_algo_for_column(const CompressionSettings *settings, const char *attname)
 {
 	if (settings->fd.algorithm == NULL)

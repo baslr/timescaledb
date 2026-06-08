@@ -871,6 +871,41 @@ RESET max_parallel_workers_per_gather;
 DROP TABLE fd_long_tags CASCADE;
 DROP TABLE fd_long_tags_expected;
 
+--------------------------------------------------------------------------------
+-- test_flat_dict_distinct_orderby:
+-- Regression test for the crash: SELECT DISTINCT ... ORDER BY on tables with
+-- flat_dictionary columns must work even when the flat_dict column is NOT in the
+-- query output. The SkipScan + IndexScan path delivers data batches before their
+-- dictionary row (dict rows have NULL min/max metadata → sort last with
+-- NULLS LAST). The fix gates flat_dict resolution on whether a flat_dict column
+-- is actually in the scan output.
+--------------------------------------------------------------------------------
+SET max_parallel_workers_per_gather = 0;
+SET enable_bitmapscan = 0;
+
+-- DISTINCT on segmentby column (triggers SkipScan + ColumnarScan + IndexScan):
+:PREFIX SELECT DISTINCT device FROM fd_metrics ORDER BY device;
+SELECT DISTINCT device FROM fd_metrics ORDER BY device;
+
+-- DISTINCT on flat_dictionary column (may use HashAggregate or Sort+Unique):
+:PREFIX SELECT DISTINCT tags FROM fd_metrics ORDER BY tags;
+SELECT DISTINCT tags FROM fd_metrics ORDER BY tags;
+
+-- DISTINCT on segmentby + flat_dict together:
+SELECT DISTINCT device, tags FROM fd_metrics ORDER BY device, tags;
+
+-- Multi-segment table: DISTINCT on segmentby (SkipScan path):
+:PREFIX SELECT DISTINCT device FROM fd_many ORDER BY device;
+SELECT DISTINCT device FROM fd_many ORDER BY device;
+
+-- Multi-segment table: DISTINCT on flat_dict column:
+SELECT DISTINCT tags FROM fd_many ORDER BY tags;
+
+-- Mixed: segmentby not in output, only flat_dict column with ORDER BY:
+SELECT DISTINCT tags FROM fd_metrics WHERE device = 'd1' ORDER BY tags;
+
+RESET enable_bitmapscan;
+
 DROP TABLE fd_metrics CASCADE;
 DROP TABLE fd_many CASCADE;
 

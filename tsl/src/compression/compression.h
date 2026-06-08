@@ -476,6 +476,16 @@ extern ArrowArray *decompress_single_column(RowDecompressor *decompressor, AttrN
  * row's deformed columns.
  */
 extern void flat_dict_decompress_load_dictionary(RowDecompressor *decompressor);
+
+/*
+ * Look up the per-column algorithm override for a named column.
+ * Returns COMPRESSION_ALGORITHM_FLAT_DICTIONARY if the column uses flat_dictionary,
+ * _INVALID_COMPRESSION_ALGORITHM otherwise. Used by the executor to determine if a
+ * column in the scan output actually needs flat_dictionary resolution.
+ */
+extern CompressionAlgorithm flat_dict_algo_for_column(const CompressionSettings *settings,
+													  const char *attname);
+
 /*
  * A convenience macro to throw an error about the corrupted compressed data, if
  * the argument is false. When fuzzing is enabled, we don't show the message not

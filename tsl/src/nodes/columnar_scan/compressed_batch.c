@@ -1106,6 +1106,39 @@ compressed_batch_resolve_flat_dict(DecompressContext *dcontext,
 
 	if (ctx == NULL)
 	{
+		/*
+		 * Safety net: if no column in this batch actually uses flat_dictionary
+		 * compression, there is nothing to resolve — the table has a flat_dict
+		 * column but this scan doesn't include it (e.g. SELECT DISTINCT
+		 * segmentby_col). In that case the prefetch may legitimately not find a
+		 * matching dictionary because the inline loader (which only sees scan-
+		 * output columns) never encountered the ARRAY blob. Treat it as "no
+		 * dictionary needed" rather than a data-corruption error.
+		 */
+		bool has_flat_dict_data = false;
+		for (int ci = 0; ci < dcontext->num_data_columns; ci++)
+		{
+			CompressionColumnDescription *cd = &dcontext->compressed_chunk_columns[ci];
+			if (cd->type != COMPRESSED_COLUMN)
+				continue;
+			bool isnull;
+			Datum val = slot_getattr(compressed_slot, cd->compressed_scan_attno, &isnull);
+			if (isnull)
+				continue;
+			CompressedDataHeader *h = (CompressedDataHeader *) DatumGetPointer(val);
+			if (h->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY)
+			{
+				has_flat_dict_data = true;
+				break;
+			}
+		}
+		if (!has_flat_dict_data)
+		{
+			/* No flat_dict column in this scan output — nothing to resolve. */
+			batch_state->flat_dict_ctx = NULL;
+			return;
+		}
+
 		ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("flat_dictionary: no segment dictionary found for compressed batch")));

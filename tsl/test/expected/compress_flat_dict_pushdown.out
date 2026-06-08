@@ -1290,6 +1290,112 @@ DROP TABLE fd_long_tags CASCADE;
 DROP TABLE
 DROP TABLE fd_long_tags_expected;
 DROP TABLE
+--------------------------------------------------------------------------------
+-- test_flat_dict_distinct_orderby:
+-- Regression test for the crash: SELECT DISTINCT ... ORDER BY on tables with
+-- flat_dictionary columns must work even when the flat_dict column is NOT in the
+-- query output. The SkipScan + IndexScan path delivers data batches before their
+-- dictionary row (dict rows have NULL min/max metadata → sort last with
+-- NULLS LAST). The fix gates flat_dict resolution on whether a flat_dict column
+-- is actually in the scan output.
+--------------------------------------------------------------------------------
+SET max_parallel_workers_per_gather = 0;
+SET
+SET enable_bitmapscan = 0;
+SET
+-- DISTINCT on segmentby column (triggers SkipScan + ColumnarScan + IndexScan):
+:PREFIX SELECT DISTINCT device FROM fd_metrics ORDER BY device;
+                                                           QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------
+ Unique
+   ->  Custom Scan (SkipScan) on _hyper_1_1_chunk
+         ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk
+               ->  Index Scan using compress_hyper_2_2_chunk_device__ts_meta_min_1__ts_meta_max_idx on compress_hyper_2_2_chunk
+(4 rows)
+
+SELECT DISTINCT device FROM fd_metrics ORDER BY device;
+ device
+--------
+ d1
+ d2
+(2 rows)
+
+-- DISTINCT on flat_dictionary column (may use HashAggregate or Sort+Unique):
+:PREFIX SELECT DISTINCT tags FROM fd_metrics ORDER BY tags;
+                         QUERY PLAN
+------------------------------------------------------------
+ Unique
+   ->  Sort
+         Sort Key: _hyper_1_1_chunk.tags
+         ->  Custom Scan (ColumnarScan) on _hyper_1_1_chunk
+               ->  Seq Scan on compress_hyper_2_2_chunk
+(5 rows)
+
+SELECT DISTINCT tags FROM fd_metrics ORDER BY tags;
+ tags
+-------
+ tag-a
+ tag-b
+ tag-c
+ tag-x
+ tag-y
+ tag-z
+(6 rows)
+
+-- DISTINCT on segmentby + flat_dict together:
+SELECT DISTINCT device, tags FROM fd_metrics ORDER BY device, tags;
+ device | tags
+--------+-------
+ d1     | tag-a
+ d1     | tag-b
+ d1     | tag-c
+ d2     | tag-x
+ d2     | tag-y
+ d2     | tag-z
+(6 rows)
+
+-- Multi-segment table: DISTINCT on segmentby (SkipScan path):
+:PREFIX SELECT DISTINCT device FROM fd_many ORDER BY device;
+                                                           QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------
+ Unique
+   ->  Custom Scan (SkipScan) on _hyper_3_3_chunk
+         ->  Custom Scan (ColumnarScan) on _hyper_3_3_chunk
+               ->  Index Scan using compress_hyper_4_4_chunk_device__ts_meta_min_1__ts_meta_max_idx on compress_hyper_4_4_chunk
+(4 rows)
+
+SELECT DISTINCT device FROM fd_many ORDER BY device;
+ device
+--------
+ dev0
+ dev1
+ dev2
+(3 rows)
+
+-- Multi-segment table: DISTINCT on flat_dict column:
+SELECT DISTINCT tags FROM fd_many ORDER BY tags;
+ tags
+-------
+ tag-0
+ tag-1
+ tag-2
+ tag-3
+ tag-4
+ tag-5
+ tag-6
+(7 rows)
+
+-- Mixed: segmentby not in output, only flat_dict column with ORDER BY:
+SELECT DISTINCT tags FROM fd_metrics WHERE device = 'd1' ORDER BY tags;
+ tags
+-------
+ tag-a
+ tag-b
+ tag-c
+(3 rows)
+
+RESET enable_bitmapscan;
+RESET
 DROP TABLE fd_metrics CASCADE;
 DROP TABLE
 DROP TABLE fd_many CASCADE;
