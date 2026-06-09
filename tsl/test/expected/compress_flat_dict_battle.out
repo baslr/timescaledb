@@ -324,3 +324,199 @@ UPDATE 30
 (3 rows)
 
 DROP TABLE
+CREATE TABLE
+INSERT 0 800
+ count 
+-------
+     1
+(1 row)
+
+ device | count | non_null | distinct_tags 
+--------+-------+----------+---------------
+ dev-0  |   100 |      100 |            15
+ dev-1  |   100 |      100 |            15
+ dev-2  |   100 |      100 |            15
+ dev-3  |   100 |      100 |            15
+ dev-4  |   100 |      100 |            15
+ dev-5  |   100 |      100 |            15
+ dev-6  |   100 |      100 |            15
+ dev-7  |   100 |      100 |            15
+(8 rows)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 600
+ count 
+-------
+     1
+(1 row)
+
+ num_segments 
+--------------
+           60
+(1 row)
+
+  host  |  region  | service | rows | non_null 
+--------+----------+---------+------+----------
+ host-0 | ap-south | svc-0   |   10 |        0
+ host-0 | ap-south | svc-1   |   10 |       10
+ host-0 | ap-south | svc-2   |   10 |       10
+ host-0 | ap-south | svc-3   |   10 |       10
+ host-0 | ap-south | svc-4   |   10 |       10
+(5 rows)
+
+ total 
+-------
+   600
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 500
+ count 
+-------
+     1
+(1 row)
+
+ is_null_device | count | distinct_tags 
+----------------+-------+---------------
+ f              |   475 |            10
+ t              |    25 |             1
+(2 rows)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 500
+ count 
+-------
+     1
+(1 row)
+
+              device_prefix               | count | count 
+------------------------------------------+-------+-------
+ device-with-a-very-long-name-0-xxxxxxxxx |   100 |     8
+ device-with-a-very-long-name-1-xxxxxxxxx |   100 |     8
+ device-with-a-very-long-name-2-xxxxxxxxx |   100 |     8
+ device-with-a-very-long-name-3-xxxxxxxxx |   100 |     8
+ device-with-a-very-long-name-4-xxxxxxxxx |   100 |     8
+(5 rows)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 600
+ count 
+-------
+     1
+(1 row)
+
+ device | count | distinct_tags 
+--------+-------+---------------
+ dev-0  |   200 |             1
+ dev-1  |   200 |             1
+ dev-2  |   200 |             1
+(3 rows)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 1000
+ count 
+-------
+     1
+(1 row)
+
+ total | distinct_tags 
+-------+---------------
+  1000 |           255
+(1 row)
+
+ cardinality_preserved 
+-----------------------
+ t
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 1000
+ count 
+-------
+     1
+(1 row)
+
+ total | distinct_tags 
+-------+---------------
+  1000 |           256
+(1 row)
+
+ cardinality_preserved 
+-----------------------
+ t
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+ still_preserved 
+-----------------
+ t
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 600
+ count 
+-------
+     1
+(1 row)
+
+ device | rows | non_null 
+--------+------+----------
+ dev-0  |  200 |        0
+ dev-1  |  200 |        0
+ dev-2  |  200 |        0
+(3 rows)
+
+ all_null 
+----------
+ t
+(1 row)
+
+DROP TABLE
+CREATE TABLE
+INSERT 0 900
+ count 
+-------
+     1
+(1 row)
+
+ device | rows | non_null | distinct_tags 
+--------+------+----------+---------------
+ dev-0  |  300 |      300 |             4
+ dev-1  |  300 |      300 |             4
+ dev-2  |  300 |        0 |             0
+(3 rows)
+
+ count 
+-------
+     1
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+ device | rows | non_null | distinct_tags 
+--------+------+----------+---------------
+ dev-0  |  300 |      300 |             4
+ dev-1  |  300 |      300 |             4
+ dev-2  |  300 |        0 |             0
+(3 rows)
+
+DROP TABLE

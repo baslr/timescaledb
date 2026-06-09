@@ -559,3 +559,278 @@ SELECT count(tags) AS non_null_tags FROM battle_dml_bug;
 SELECT device, count(*) AS rows FROM battle_dml_bug GROUP BY device ORDER BY device;
 
 DROP TABLE battle_dml_bug CASCADE;
+
+--------------------------------------------------------------------------------
+-- SCENARIO 5: Various Segment Configurations
+--
+-- Tests flat_dictionary with different segmentby setups:
+-- 5a: Single segmentby column (baseline)
+-- 5b: 3 segmentby columns (composite key)
+-- 5c: Segmentby with NULL values
+-- 5d: Segmentby with very long text values
+--------------------------------------------------------------------------------
+
+-- 5a: Single segmentby (already covered by scenarios 1-3, quick sanity check)
+CREATE TABLE battle_seg1(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_seg1
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'dev-' || (g % 8), '["s1-tag=' || (g % 15) || '"]', g * 0.1
+FROM generate_series(1, 800) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg1') ch;
+SELECT device, count(*), count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
+FROM battle_seg1 GROUP BY device ORDER BY device;
+DROP TABLE battle_seg1 CASCADE;
+
+-- 5b: 3 segmentby columns — exercises composite cache key
+CREATE TABLE battle_seg3(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    region text NOT NULL,
+    service text NOT NULL,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'host,region,service',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_seg3
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'host-' || (g % 3),
+       (CASE g % 4 WHEN 0 THEN 'us-east' WHEN 1 THEN 'eu-west' WHEN 2 THEN 'ap-south' ELSE 'us-west' END),
+       'svc-' || (g % 5),
+       CASE WHEN g % 30 = 0 THEN NULL ELSE '["env=prod","tier=' || (g % 3) || '"]' END,
+       g * 0.1
+FROM generate_series(1, 600) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg3') ch;
+
+-- Verify per-segment isolation with 3 keys (3×4×5 = 60 segments)
+SELECT count(DISTINCT (host, region, service)) AS num_segments FROM battle_seg3;
+SELECT host, region, service, count(*) AS rows, count(tags) AS non_null
+FROM battle_seg3 GROUP BY host, region, service ORDER BY host, region, service LIMIT 5;
+
+-- Basic read after compress (validates per-segment isolation)
+SELECT count(*) AS total FROM battle_seg3;
+DROP TABLE battle_seg3 CASCADE;
+
+-- 5c: Segmentby with NULL values
+CREATE TABLE battle_seg_null(
+    time timestamptz NOT NULL,
+    device text,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_seg_null
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       CASE WHEN g % 20 = 0 THEN NULL ELSE 'dev-' || (g % 4) END,
+       '["tag=' || (g % 10) || '"]',
+       g * 0.1
+FROM generate_series(1, 500) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg_null') ch;
+
+-- NULL segmentby forms its own segment — must work correctly
+SELECT device IS NULL AS is_null_device, count(*), count(DISTINCT tags) AS distinct_tags
+FROM battle_seg_null GROUP BY device IS NULL ORDER BY is_null_device;
+DROP TABLE battle_seg_null CASCADE;
+
+-- 5d: Segmentby with long text values (tests cache key serialization)
+CREATE TABLE battle_seg_long(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_seg_long
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'device-with-a-very-long-name-' || (g % 5) || '-' || repeat('x', 40),
+       '["tag=' || (g % 8) || '"]',
+       g * 0.1
+FROM generate_series(1, 500) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg_long') ch;
+SELECT left(device, 40) AS device_prefix, count(*), count(DISTINCT tags)
+FROM battle_seg_long GROUP BY device ORDER BY device LIMIT 5;
+DROP TABLE battle_seg_long CASCADE;
+
+--------------------------------------------------------------------------------
+-- SCENARIO 6: Edge Cases bei Kardinalität
+--
+-- Tests flat_dictionary with extreme cardinality scenarios:
+-- 6a: 1 distinct tag per segment (degenerate dictionary)
+-- 6b: 255 distinct tags (uint8 max — boundary test)
+-- 6c: 256 distinct tags (forces uint16 index width)
+-- 6d: All NULL tags (no dictionary row at all)
+-- 6e: Mix of segments with and without dictionary in one chunk
+--------------------------------------------------------------------------------
+
+-- 6a: Degenerate dictionary (cardinality = 1)
+CREATE TABLE battle_card1(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_card1
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'dev-' || (g % 3),
+       '["always-the-same-tag"]',
+       g * 0.1
+FROM generate_series(1, 600) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card1') ch;
+SELECT device, count(*), count(DISTINCT tags) AS distinct_tags FROM battle_card1
+GROUP BY device ORDER BY device;
+DROP TABLE battle_card1 CASCADE;
+
+-- 6b: Exactly 255 distinct tags (uint8 boundary — max for 1-byte index)
+CREATE TABLE battle_card255(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_card255
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'dev-0',
+       '["distinct-tag-' || (g % 255) || '"]',
+       g * 0.1
+FROM generate_series(1, 1000) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card255') ch;
+SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM battle_card255;
+-- Verify all 255 distinct tags survived round-trip
+SELECT count(DISTINCT tags) = 255 AS cardinality_preserved FROM battle_card255;
+DROP TABLE battle_card255 CASCADE;
+
+-- 6c: 256 distinct tags (forces uint16 index width)
+CREATE TABLE battle_card256(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text NOT NULL,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_card256
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'dev-0',
+       '["distinct-tag-' || (g % 256) || '"]',
+       g * 0.1
+FROM generate_series(1, 1000) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card256') ch;
+SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM battle_card256;
+SELECT count(DISTINCT tags) = 256 AS cardinality_preserved FROM battle_card256;
+
+-- Decompress/recompress with uint16 index width
+SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_card256') ch;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card256') ch;
+SELECT count(DISTINCT tags) = 256 AS still_preserved FROM battle_card256;
+DROP TABLE battle_card256 CASCADE;
+
+-- 6d: All NULL tags (no dictionary exists for this segment)
+CREATE TABLE battle_card_null(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+INSERT INTO battle_card_null
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'dev-' || (g % 3),
+       NULL,
+       g * 0.1
+FROM generate_series(1, 600) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_null') ch;
+SELECT device, count(*) AS rows, count(tags) AS non_null FROM battle_card_null
+GROUP BY device ORDER BY device;
+-- All must be NULL
+SELECT count(tags) = 0 AS all_null FROM battle_card_null;
+DROP TABLE battle_card_null CASCADE;
+
+-- 6e: Mixed segments — some with dictionary, some all-NULL
+CREATE TABLE battle_card_mix(
+    time timestamptz NOT NULL,
+    device text NOT NULL,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'device',
+    tsdb.orderby = 'time',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+-- dev-0 and dev-1: have tags (dictionary). dev-2: all NULL (no dictionary).
+INSERT INTO battle_card_mix
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'dev-' || (g % 3),
+       CASE WHEN (g % 3) = 2 THEN NULL
+            ELSE '["tag=' || (g % 12) || '"]'
+       END,
+       g * 0.1
+FROM generate_series(1, 900) g;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
+
+-- dev-0/1 must have tags, dev-2 must be all NULL
+SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
+FROM battle_card_mix GROUP BY device ORDER BY device;
+
+-- Decompress/recompress must preserve the mix
+SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
+SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
+FROM battle_card_mix GROUP BY device ORDER BY device;
+DROP TABLE battle_card_mix CASCADE;

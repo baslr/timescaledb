@@ -741,12 +741,18 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type, FlatDict
 		/* Build dictionary Arrow from ctx->values[] */
 		if (ctx == NULL)
 		{
-			/* All-NULL segment: produce an all-NULL result */
+			/* All-NULL segment: produce an all-NULL Arrow that looks like a
+			 * valid DT_ArrowText array (uint32 offsets + empty data buffer).
+			 * Every row is NULL so offsets are all zero and data is empty. */
 			result->null_count = n;
-			result->n_buffers = 2;
-			result->buffers = palloc0(sizeof(void *) * 2);
+			result->n_buffers = 3;
+			result->buffers = palloc0(sizeof(void *) * 3);
+			/* validity: all zeros = all NULL */
 			result->buffers[0] = palloc0(sizeof(uint64) * ((n + 63) / 64));
-			result->buffers[1] = palloc0(pad_to_multiple(64, sizeof(int16) * n));
+			/* uint32 offsets: all zero (no data) */
+			result->buffers[1] = palloc0(pad_to_multiple(64, sizeof(uint32) * (n + 1)));
+			/* empty data buffer */
+			result->buffers[2] = palloc(64);
 			MemoryContextSwitchTo(old_ctx);
 			return result;
 		}
