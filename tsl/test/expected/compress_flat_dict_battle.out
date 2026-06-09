@@ -94,7 +94,6 @@ FROM battle_highload;
  total_rows | devices | non_null_tags | distinct_tags 
 ------------+---------+---------------+---------------
       20000 |      10 |         19900 |           160
-(1 row)
 
 -- Compress all chunks
 SELECT count(compress_chunk(ch)) AS compressed_chunks
@@ -102,7 +101,6 @@ FROM show_chunks('battle_highload') ch;
  compressed_chunks 
 -------------------
                  6
-(1 row)
 
 -- Verify: total row count matches
 SELECT
@@ -113,7 +111,6 @@ SELECT
  after_compress | expected | counts_match 
 ----------------+----------+--------------
           20000 |    20000 | t
-(1 row)
 
 -- Verify: exact row-by-row comparison (EXCEPT returns 0 on match)
 SELECT count(*) AS data_mismatches FROM (
@@ -128,7 +125,6 @@ SELECT count(*) AS data_mismatches FROM (
  data_mismatches 
 -----------------
                0
-(1 row)
 
 -- Verify: per-device stats intact
 SELECT device,
@@ -150,7 +146,6 @@ ORDER BY device;
  device-7 | 2000 |     2000 |             6
  device-8 | 2000 |     2000 |             6
  device-9 | 2000 |     2000 |             6
-(10 rows)
 
 --------------------------------------------------------------------------------
 -- SCENARIO 2: Decompress + Re-Compress Round-Trip
@@ -165,7 +160,6 @@ FROM show_chunks('battle_highload') ch;
  decompressed_chunks 
 ---------------------
                    6
-(1 row)
 
 -- After decompression, data must still match reference
 SELECT count(*) AS mismatches_after_decompress_1 FROM (
@@ -180,7 +174,6 @@ SELECT count(*) AS mismatches_after_decompress_1 FROM (
  mismatches_after_decompress_1 
 -------------------------------
                              0
-(1 row)
 
 -- Round-trip #1: Re-compress
 SELECT count(compress_chunk(ch)) AS recompressed_chunks_1
@@ -188,7 +181,6 @@ FROM show_chunks('battle_highload') ch;
  recompressed_chunks_1 
 -----------------------
                      6
-(1 row)
 
 -- Verify again after re-compression
 SELECT count(*) AS mismatches_after_recompress_1 FROM (
@@ -203,7 +195,6 @@ SELECT count(*) AS mismatches_after_recompress_1 FROM (
  mismatches_after_recompress_1 
 -------------------------------
                              0
-(1 row)
 
 -- Round-trip #2: Decompress again
 SELECT count(decompress_chunk(ch)) AS decompressed_chunks_2
@@ -211,7 +202,6 @@ FROM show_chunks('battle_highload') ch;
  decompressed_chunks_2 
 -----------------------
                      6
-(1 row)
 
 SELECT count(*) AS mismatches_after_decompress_2 FROM (
     (SELECT time, device, tags, value FROM battle_highload
@@ -225,7 +215,6 @@ SELECT count(*) AS mismatches_after_decompress_2 FROM (
  mismatches_after_decompress_2 
 -------------------------------
                              0
-(1 row)
 
 -- Round-trip #2: Re-compress again
 SELECT count(compress_chunk(ch)) AS recompressed_chunks_2
@@ -233,7 +222,6 @@ FROM show_chunks('battle_highload') ch;
  recompressed_chunks_2 
 -----------------------
                      6
-(1 row)
 
 SELECT count(*) AS mismatches_after_recompress_2 FROM (
     (SELECT time, device, tags, value FROM battle_highload
@@ -247,20 +235,17 @@ SELECT count(*) AS mismatches_after_recompress_2 FROM (
  mismatches_after_recompress_2 
 -------------------------------
                              0
-(1 row)
 
 -- Round-trip #3: One more cycle to catch accumulation bugs
 SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_highload') ch;
  count 
 -------
      6
-(1 row)
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('battle_highload') ch;
  count 
 -------
      6
-(1 row)
 
 SELECT count(*) AS mismatches_after_roundtrip_3 FROM (
     (SELECT time, device, tags, value FROM battle_highload
@@ -274,7 +259,6 @@ SELECT count(*) AS mismatches_after_roundtrip_3 FROM (
  mismatches_after_roundtrip_3 
 ------------------------------
                             0
-(1 row)
 
 -- Per-device integrity after 3 round-trips
 SELECT device,
@@ -296,7 +280,6 @@ ORDER BY device;
  device-7 | 2000 |     2000 |             6
  device-8 | 2000 |     2000 |             6
  device-9 | 2000 |     2000 |             6
-(10 rows)
 
 DROP TABLE battle_highload CASCADE;
 DROP TABLE battle_highload_ref;
@@ -357,14 +340,12 @@ FROM show_chunks('battle_dml') ch;
  compressed_chunks 
 -------------------
                  1
-(1 row)
 
 -- Save state before DML
 SELECT count(*) AS rows_before_dml FROM battle_dml;
  rows_before_dml 
 -----------------
             3000
-(1 row)
 
 --------------------------------------------------------------------------------
 -- 3a: INSERT into compressed chunk (triggers partial decompression)
@@ -381,7 +362,6 @@ SELECT count(*) AS rows_after_insert FROM battle_dml;
  rows_after_insert 
 -------------------
               3005
-(1 row)
 
 SELECT device, tags, value FROM battle_dml WHERE value > 999 ORDER BY device;
  device |                                 tags                                  | value 
@@ -391,7 +371,6 @@ SELECT device, tags, value FROM battle_dml WHERE value > 999 ORDER BY device;
  dev-2  |                                                                       | 999.3
  dev-3  | ["metric=cpu","host=dev-3","process=new-insert-4","payload=INSERTED"] | 999.4
  dev-4  | ["metric=cpu","host=dev-4","process=new-insert-5","payload=INSERTED"] | 999.5
-(5 rows)
 
 -- Verify existing data not corrupted by the insert
 SELECT device, count(*) AS rows, count(tags) AS non_null
@@ -405,7 +384,6 @@ ORDER BY device;
  dev-2  |  601 |      600
  dev-3  |  601 |      601
  dev-4  |  601 |      601
-(5 rows)
 
 --------------------------------------------------------------------------------
 -- 3b: DELETE from compressed chunk (filter on non-flat-dict columns only)
@@ -417,7 +395,6 @@ SELECT count(*) AS rows_after_delete FROM battle_dml;
  rows_after_delete 
 -------------------
               3000
-(1 row)
 
 -- The inserted rows should still be there
 SELECT device, tags, value FROM battle_dml WHERE value > 999 ORDER BY device;
@@ -428,7 +405,6 @@ SELECT device, tags, value FROM battle_dml WHERE value > 999 ORDER BY device;
  dev-2  |                                                                       | 999.3
  dev-3  | ["metric=cpu","host=dev-3","process=new-insert-4","payload=INSERTED"] | 999.4
  dev-4  | ["metric=cpu","host=dev-4","process=new-insert-5","payload=INSERTED"] | 999.5
-(5 rows)
 
 -- Per-device counts must be consistent (no phantom rows)
 SELECT device, count(*) AS rows, count(tags) AS non_null
@@ -442,7 +418,6 @@ ORDER BY device;
  dev-2  |  600 |      599
  dev-3  |  600 |      600
  dev-4  |  600 |      600
-(5 rows)
 
 --------------------------------------------------------------------------------
 -- 3c: UPDATE on compressed chunk (filter on segmentby + value, not tags)
@@ -465,7 +440,6 @@ SELECT device, tags, value FROM battle_dml WHERE value > 999 ORDER BY device;
  dev-2  |                                                                            | 999.3
  dev-3  | ["metric=cpu","host=dev-3","process=new-insert-4","payload=INSERTED"]      | 999.4
  dev-4  | ["metric=cpu","host=dev-4","process=new-insert-5","payload=INSERTED"]      | 999.5
-(5 rows)
 
 -- Update value column filtered by segmentby only
 UPDATE battle_dml SET value = -1.0 WHERE device = 'dev-0' AND value BETWEEN 0.6 AND 1.0;
@@ -473,7 +447,6 @@ SELECT count(*) AS updated_to_neg1 FROM battle_dml WHERE value = -1.0;
  updated_to_neg1 
 -----------------
                1
-(1 row)
 
 --------------------------------------------------------------------------------
 -- 3d: Mixed DML sequence then re-compress
@@ -499,7 +472,6 @@ SELECT count(*) AS rows_before_recompress FROM battle_dml;
  rows_before_recompress 
 ------------------------
                    3099
-(1 row)
 
 SELECT device, count(*) AS rows, count(tags) AS non_null,
        count(DISTINCT tags) AS distinct_tags
@@ -511,7 +483,6 @@ FROM battle_dml GROUP BY device ORDER BY device;
  dev-2  |  620 |      619 |            24
  dev-3  |  620 |      620 |            25
  dev-4  |  620 |      620 |            25
-(5 rows)
 
 -- Re-compress everything
 SELECT count(compress_chunk(ch, if_not_compressed => true)) AS recompressed
@@ -519,14 +490,12 @@ FROM show_chunks('battle_dml') ch;
  recompressed 
 --------------
             1
-(1 row)
 
 -- Validate after re-compression: counts must match
 SELECT count(*) AS rows_after_recompress FROM battle_dml;
  rows_after_recompress 
 -----------------------
                   3099
-(1 row)
 
 -- Per-device verification after recompress
 SELECT device,
@@ -543,7 +512,6 @@ ORDER BY device;
  dev-2  |  620 |      619 |            24
  dev-3  |  620 |      620 |            25
  dev-4  |  620 |      620 |            25
-(5 rows)
 
 --------------------------------------------------------------------------------
 -- 3e: Decompress after DML+recompress cycle — final integrity check
@@ -553,7 +521,6 @@ SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_dml') ch;
  count 
 -------
      1
-(1 row)
 
 -- After full decompression, CTAS should work (no partial chunks)
 CREATE TABLE battle_dml_ref AS SELECT * FROM battle_dml;
@@ -562,7 +529,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_dml') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(*) AS mismatches_after_final_recompress FROM (
     (SELECT time, device, tags, value FROM battle_dml
@@ -576,7 +542,6 @@ SELECT count(*) AS mismatches_after_final_recompress FROM (
  mismatches_after_final_recompress 
 -----------------------------------
                                  0
-(1 row)
 
 DROP TABLE battle_dml CASCADE;
 DROP TABLE battle_dml_ref;
@@ -619,7 +584,6 @@ SELECT count(compress_chunk(ch)) AS compressed FROM show_chunks('battle_dml_mult
  compressed 
 ------------
           2
-(1 row)
 
 -- INSERT into specific segment (host-0, cpu)
 INSERT INTO battle_dml_multi_seg VALUES
@@ -639,7 +603,6 @@ SELECT host, metric, tags, value FROM battle_dml_multi_seg WHERE value = 9999;
   host  | metric |                 tags                  | value 
 --------+--------+---------------------------------------+-------
  host-0 | cpu    | ["core=99","INSERTED-into-host0-cpu"] |  9999
-(1 row)
 
 -- Verify no cross-contamination between segments after DML
 SELECT count(*) AS contamination FROM battle_dml_multi_seg
@@ -647,14 +610,12 @@ WHERE host = 'host-0' AND metric = 'cpu' AND tags LIKE '%mount=%';
  contamination 
 ---------------
              0
-(1 row)
 
 SELECT count(*) AS contamination FROM battle_dml_multi_seg
 WHERE host = 'host-1' AND metric = 'mem' AND tags LIKE '%core=%';
  contamination 
 ---------------
              0
-(1 row)
 
 -- Re-compress and verify full round-trip via decompress + CTAS + EXCEPT
 -- (Decompress first to avoid the partial-chunk ColumnarScan pfree bug)
@@ -662,21 +623,18 @@ SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_dml_multi_seg') ch;
  count 
 -------
      2
-(1 row)
 
 CREATE TABLE battle_dml_multi_ref AS SELECT * FROM battle_dml_multi_seg;
 SELECT count(compress_chunk(ch)) FROM show_chunks('battle_dml_multi_seg') ch;
  count 
 -------
      2
-(1 row)
 
 -- After full recompress, decompress again and compare
 SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_dml_multi_seg') ch;
  count 
 -------
      2
-(1 row)
 
 SELECT count(*) AS mismatches FROM (
     (SELECT time, host, metric, tags, value FROM battle_dml_multi_seg
@@ -690,7 +648,6 @@ SELECT count(*) AS mismatches FROM (
  mismatches 
 ------------
           0
-(1 row)
 
 DROP TABLE battle_dml_multi_seg CASCADE;
 DROP TABLE battle_dml_multi_ref;
@@ -728,7 +685,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_dml_bug') ch;
  count 
 -------
      1
-(1 row)
 
 -- BUG 1 (FIXED): UPDATE with WHERE referencing flat_dict column on compressed chunk
 UPDATE battle_dml_bug SET value = -1.0 WHERE tags IS NOT NULL AND device = 'dev-0';
@@ -736,7 +692,6 @@ SELECT count(*) AS bug1_updated FROM battle_dml_bug WHERE value = -1.0;
  bug1_updated 
 --------------
            90
-(1 row)
 
 -- BUG 2 (FIXED): DELETE with WHERE referencing flat_dict column on compressed chunk
 DELETE FROM battle_dml_bug WHERE tags LIKE '%test-1%';
@@ -746,20 +701,17 @@ SELECT count(*) AS bug3_updated FROM battle_dml_bug WHERE tags = '["UPDATED"]';
  bug3_updated 
 --------------
            30
-(1 row)
 
 -- Verify the table is intact after DMLs
 SELECT count(*) AS total_rows FROM battle_dml_bug;
  total_rows 
 ------------
         270
-(1 row)
 
 SELECT count(tags) AS non_null_tags FROM battle_dml_bug;
  non_null_tags 
 ---------------
            240
-(1 row)
 
 SELECT device, count(*) AS rows FROM battle_dml_bug GROUP BY device ORDER BY device;
  device | rows 
@@ -767,7 +719,6 @@ SELECT device, count(*) AS rows FROM battle_dml_bug GROUP BY device ORDER BY dev
  dev-0  |   90
  dev-1  |   90
  dev-2  |   90
-(3 rows)
 
 DROP TABLE battle_dml_bug CASCADE;
 --------------------------------------------------------------------------------
@@ -801,7 +752,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg1') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT device, count(*), count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM battle_seg1 GROUP BY device ORDER BY device;
@@ -815,7 +765,6 @@ FROM battle_seg1 GROUP BY device ORDER BY device;
  dev-5  |   100 |      100 |            15
  dev-6  |   100 |      100 |            15
  dev-7  |   100 |      100 |            15
-(8 rows)
 
 DROP TABLE battle_seg1 CASCADE;
 -- 5b: 3 segmentby columns — exercises composite cache key
@@ -846,14 +795,12 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg3') ch;
  count 
 -------
      1
-(1 row)
 
 -- Verify per-segment isolation with 3 keys (3×4×5 = 60 segments)
 SELECT count(DISTINCT (host, region, service)) AS num_segments FROM battle_seg3;
  num_segments 
 --------------
            60
-(1 row)
 
 SELECT host, region, service, count(*) AS rows, count(tags) AS non_null
 FROM battle_seg3 GROUP BY host, region, service ORDER BY host, region, service LIMIT 5;
@@ -864,14 +811,12 @@ FROM battle_seg3 GROUP BY host, region, service ORDER BY host, region, service L
  host-0 | ap-south | svc-2   |   10 |       10
  host-0 | ap-south | svc-3   |   10 |       10
  host-0 | ap-south | svc-4   |   10 |       10
-(5 rows)
 
 -- Basic read after compress (validates per-segment isolation)
 SELECT count(*) AS total FROM battle_seg3;
  total 
 -------
    600
-(1 row)
 
 DROP TABLE battle_seg3 CASCADE;
 -- 5c: Segmentby with NULL values
@@ -898,7 +843,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg_null') ch;
  count 
 -------
      1
-(1 row)
 
 -- NULL segmentby forms its own segment — must work correctly
 SELECT device IS NULL AS is_null_device, count(*), count(DISTINCT tags) AS distinct_tags
@@ -907,7 +851,6 @@ FROM battle_seg_null GROUP BY device IS NULL ORDER BY is_null_device;
 ----------------+-------+---------------
  f              |   475 |            10
  t              |    25 |             1
-(2 rows)
 
 DROP TABLE battle_seg_null CASCADE;
 -- 5d: Segmentby with long text values (tests cache key serialization)
@@ -934,7 +877,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_seg_long') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT left(device, 40) AS device_prefix, count(*), count(DISTINCT tags)
 FROM battle_seg_long GROUP BY device ORDER BY device LIMIT 5;
@@ -945,7 +887,6 @@ FROM battle_seg_long GROUP BY device ORDER BY device LIMIT 5;
  device-with-a-very-long-name-2-xxxxxxxxx |   100 |     8
  device-with-a-very-long-name-3-xxxxxxxxx |   100 |     8
  device-with-a-very-long-name-4-xxxxxxxxx |   100 |     8
-(5 rows)
 
 DROP TABLE battle_seg_long CASCADE;
 --------------------------------------------------------------------------------
@@ -982,7 +923,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card1') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT device, count(*), count(DISTINCT tags) AS distinct_tags FROM battle_card1
 GROUP BY device ORDER BY device;
@@ -991,7 +931,6 @@ GROUP BY device ORDER BY device;
  dev-0  |   200 |             1
  dev-1  |   200 |             1
  dev-2  |   200 |             1
-(3 rows)
 
 DROP TABLE battle_card1 CASCADE;
 -- 6b: Exactly 255 distinct tags (uint8 boundary — max for 1-byte index)
@@ -1018,20 +957,17 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card255') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM battle_card255;
  total | distinct_tags 
 -------+---------------
   1000 |           255
-(1 row)
 
 -- Verify all 255 distinct tags survived round-trip
 SELECT count(DISTINCT tags) = 255 AS cardinality_preserved FROM battle_card255;
  cardinality_preserved 
 -----------------------
  t
-(1 row)
 
 DROP TABLE battle_card255 CASCADE;
 -- 6c: 256 distinct tags (forces uint16 index width)
@@ -1058,38 +994,32 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card256') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(*) AS total, count(DISTINCT tags) AS distinct_tags FROM battle_card256;
  total | distinct_tags 
 -------+---------------
   1000 |           256
-(1 row)
 
 SELECT count(DISTINCT tags) = 256 AS cardinality_preserved FROM battle_card256;
  cardinality_preserved 
 -----------------------
  t
-(1 row)
 
 -- Decompress/recompress with uint16 index width
 SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_card256') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card256') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(DISTINCT tags) = 256 AS still_preserved FROM battle_card256;
  still_preserved 
 -----------------
  t
-(1 row)
 
 DROP TABLE battle_card256 CASCADE;
 -- 6d: All NULL tags (no dictionary exists for this segment)
@@ -1116,7 +1046,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_null') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT device, count(*) AS rows, count(tags) AS non_null FROM battle_card_null
 GROUP BY device ORDER BY device;
@@ -1125,14 +1054,12 @@ GROUP BY device ORDER BY device;
  dev-0  |  200 |        0
  dev-1  |  200 |        0
  dev-2  |  200 |        0
-(3 rows)
 
 -- All must be NULL
 SELECT count(tags) = 0 AS all_null FROM battle_card_null;
  all_null 
 ----------
  t
-(1 row)
 
 DROP TABLE battle_card_null CASCADE;
 -- 6e: Mixed segments — some with dictionary, some all-NULL
@@ -1162,7 +1089,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
  count 
 -------
      1
-(1 row)
 
 -- dev-0/1 must have tags, dev-2 must be all NULL
 SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
@@ -1172,20 +1098,17 @@ FROM battle_card_mix GROUP BY device ORDER BY device;
  dev-0  |  300 |      300 |             4
  dev-1  |  300 |      300 |             4
  dev-2  |  300 |        0 |             0
-(3 rows)
 
 -- Decompress/recompress must preserve the mix
 SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM battle_card_mix GROUP BY device ORDER BY device;
@@ -1194,7 +1117,6 @@ FROM battle_card_mix GROUP BY device ORDER BY device;
  dev-0  |  300 |      300 |             4
  dev-1  |  300 |      300 |             4
  dev-2  |  300 |        0 |             0
-(3 rows)
 
 DROP TABLE battle_card_mix CASCADE;
 --------------------------------------------------------------------------------
@@ -1235,13 +1157,11 @@ WHERE relid = 'battle_catalog'::regclass;
  algorithm 
 -----------
  {tags=8}
-(1 row)
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('battle_catalog') ch;
  count 
 -------
      1
-(1 row)
 
 -- Verify compressed chunk has dictionary rows (_ts_meta_count = 0)
 -- Use the compression stats view to confirm chunks are compressed
@@ -1250,34 +1170,29 @@ FROM hypertable_compression_stats('battle_catalog');
  total_chunks | number_compressed_chunks 
 --------------+--------------------------
             1 |                        1
-(1 row)
 
 -- Verify data survives full round-trip (decompress + recompress)
 SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_catalog') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM battle_catalog;
  total | non_null | distinct_tags 
 -------+----------+---------------
    300 |      285 |            10
-(1 row)
 
 SELECT count(compress_chunk(ch)) FROM show_chunks('battle_catalog') ch;
  count 
 -------
      1
-(1 row)
 
 SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM battle_catalog;
  total | non_null | distinct_tags 
 -------+----------+---------------
    300 |      285 |            10
-(1 row)
 
 -- Verify algorithm setting persists after decompress/recompress
 SELECT algorithm FROM _timescaledb_catalog.compression_settings
@@ -1285,6 +1200,5 @@ WHERE relid = 'battle_catalog'::regclass;
  algorithm 
 -----------
  {tags=8}
-(1 row)
 
 DROP TABLE battle_catalog CASCADE;

@@ -167,14 +167,12 @@ FROM std_long_tags WHERE tags IS NOT NULL;
  min_len | avg_len | max_len | over_2000 
 ---------+---------+---------+-----------
       68 |    1010 |    3499 |      2264
-(1 row)
 
 -- Compress
 SELECT count(compress_chunk(ch)) FROM show_chunks('std_long_tags') ch;
  count 
 -------
      1
-(1 row)
 
 SET max_parallel_workers_per_gather = 0;
 --------------------------------------------------------------------------------
@@ -186,7 +184,6 @@ SELECT
  compressed_count | expected_count 
 ------------------+----------------
             12800 |          12800
-(1 row)
 
 SELECT count(*) AS mismatched_rows FROM (
     (SELECT time, host, metric, value, tags FROM std_long_tags
@@ -200,7 +197,6 @@ SELECT count(*) AS mismatched_rows FROM (
  mismatched_rows 
 -----------------
                0
-(1 row)
 
 -- Tag lengths must survive compression:
 SELECT
@@ -212,7 +208,6 @@ FROM std_long_tags WHERE tags IS NOT NULL;
  min_len | avg_len | max_len | over_2000 
 ---------+---------+---------+-----------
       68 |    1010 |    3499 |      2264
-(1 row)
 
 -- Per-segment distinct counts:
 SELECT host, metric, count(DISTINCT tags) AS distinct_tags, count(*) AS rows
@@ -230,7 +225,6 @@ ORDER BY host, metric;
  bravo   | temperature |             0 |  800
  charlie | containers  |           100 | 1000
  charlie | temperature |             0 |  600
-(9 rows)
 
 -- NULL-tags segments must be intact:
 SELECT host, count(*) AS total, count(tags) AS non_null
@@ -241,14 +235,12 @@ GROUP BY host ORDER BY host;
  alpha   |   500 |        0
  bravo   |   800 |        0
  charlie |   600 |        0
-(3 rows)
 
 -- Batch sorted merge (min/max):
 SELECT min(time), max(time) FROM std_long_tags;
              min              |             max              
 ------------------------------+------------------------------
  Sun Jun 01 00:00:01 2025 UTC | Sun Jun 01 00:38:20 2025 UTC
-(1 row)
 
 SELECT time, host, metric, length(tags) AS tag_len
 FROM std_long_tags ORDER BY time LIMIT 3;
@@ -257,7 +249,6 @@ FROM std_long_tags ORDER BY time LIMIT 3;
  Sun Jun 01 00:00:01 2025 UTC | alpha | containers |     739
  Sun Jun 01 00:00:01 2025 UTC | alpha | process    |     126
  Sun Jun 01 00:00:01 2025 UTC | alpha | requests   |     326
-(3 rows)
 
 SELECT time, host, metric, length(tags) AS tag_len
 FROM std_long_tags ORDER BY time DESC LIMIT 3;
@@ -266,7 +257,6 @@ FROM std_long_tags ORDER BY time DESC LIMIT 3;
  Sun Jun 01 00:38:20 2025 UTC | alpha | process |     328
  Sun Jun 01 00:38:19 2025 UTC | alpha | process |     343
  Sun Jun 01 00:38:18 2025 UTC | alpha | process |     327
-(3 rows)
 
 -- Cross-contamination:
 SELECT count(*) AS cross_contamination FROM std_long_tags
@@ -275,7 +265,6 @@ WHERE host = 'alpha' AND metric = 'containers'
  cross_contamination 
 ---------------------
                    0
-(1 row)
 
 SELECT count(*) AS cross_contamination FROM std_long_tags
 WHERE host = 'bravo' AND metric = 'containers'
@@ -283,7 +272,6 @@ WHERE host = 'bravo' AND metric = 'containers'
  cross_contamination 
 ---------------------
                    0
-(1 row)
 
 -- Spot-check a long value:
 SELECT length(tags) AS len, left(tags, 80) AS prefix, right(tags, 40) AS suffix
@@ -293,20 +281,17 @@ LIMIT 1;
  len |                                      prefix                                      |                  suffix                  
 -----+----------------------------------------------------------------------------------+------------------------------------------
  649 | ["container-0","image=registry.internal.corp/team-0/service-payment-gateway:v1.0 | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
-(1 row)
 
 -- Queries without segmentby in SELECT:
 SELECT count(tags) AS non_null_count FROM std_long_tags;
  non_null_count 
 ----------------
           10900
-(1 row)
 
 SELECT count(DISTINCT tags) AS distinct_tags FROM std_long_tags;
  distinct_tags 
 ---------------
           4270
-(1 row)
 
 RESET max_parallel_workers_per_gather;
 DROP TABLE std_long_tags CASCADE;
