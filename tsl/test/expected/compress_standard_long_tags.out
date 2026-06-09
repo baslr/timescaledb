@@ -5,7 +5,6 @@
 -- multiple segments, and varying cardinalities. Mirrors the flat_dict tests
 -- to ensure the default dictionary algorithm handles the same workloads.
 SET timezone TO 'UTC';
-SET
 CREATE TABLE std_long_tags(
     time timestamptz NOT NULL,
     host text NOT NULL,
@@ -19,7 +18,6 @@ CREATE TABLE std_long_tags(
     tsdb.segmentby = 'host,metric',
     tsdb.orderby = 'time desc'
 );
-CREATE TABLE
 CREATE TABLE std_long_tags_expected(
     time timestamptz NOT NULL,
     host text NOT NULL,
@@ -27,7 +25,6 @@ CREATE TABLE std_long_tags_expected(
     value float NOT NULL,
     tags text
 );
-CREATE TABLE
 -- Host alpha: containers (30 distinct tags, 800-2500 bytes, 2100 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
@@ -55,7 +52,6 @@ SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
                             10 + (g % 30)) || '",'
        || '"annotations=' || repeat('a', 200 + (g % 30) * 60) || '"]'
 FROM generate_series(1, 2100) g;
-INSERT 0 2100
 -- Host alpha: requests (15 distinct tags, 400-1200 bytes, 1500 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
@@ -80,7 +76,6 @@ SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
        END) || '?session_id=' || repeat('s', 100 + (g % 15) * 50)
        || '&trace_id=' || repeat('t', 80 + (g % 15) * 30) || '"]'
 FROM generate_series(1, 1500) g;
-INSERT 0 1500
 -- Host alpha: process (23 distinct tags, 200-500 bytes, 2300 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
@@ -99,13 +94,11 @@ SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
            WHEN 21 THEN 'logstash' ELSE 'java-app-service-worker'
        END) || '","cpu_seconds","' || repeat('p', 100 + (g % 300)) || '"]'
 FROM generate_series(1, 2300) g;
-INSERT 0 2300
 -- Host alpha: temperature (NULL tags, 500 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
        'alpha', 'temperature', 1030000 + g, NULL
 FROM generate_series(1, 500) g;
-INSERT 0 500
 -- Host bravo: containers (25 distinct tags, 1000-2500 bytes, 2200 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
@@ -130,7 +123,6 @@ SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
                                   15 + (g % 25) * 2) || '",'
        || '"tolerations=' || repeat('T', 300 + (g % 25) * 70) || '"]'
 FROM generate_series(1, 2200) g;
-INSERT 0 2200
 -- Host bravo: disk_io (13 distinct tags, 120-300 bytes, 1800 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
@@ -143,13 +135,11 @@ SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
            WHEN 10 THEN 'dm-3' WHEN 11 THEN 'md0' ELSE 'md1'
        END) || '","iops","' || repeat('b', 60 + (g % 180)) || '"]'
 FROM generate_series(1, 1800) g;
-INSERT 0 1800
 -- Host bravo: temperature (NULL tags, 800 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
        'bravo', 'temperature', 2020000 + g, NULL
 FROM generate_series(1, 800) g;
-INSERT 0 800
 -- Host charlie: containers (5 distinct tags, 100-250 bytes, 1000 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
@@ -160,16 +150,13 @@ SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
            WHEN 3 THEN '/dev/vdb' ELSE '/dev/vdb1'
        END) || '","latency_us","' || repeat('c', 40 + (g % 100)) || '"]'
 FROM generate_series(1, 1000) g;
-INSERT 0 1000
 -- Host charlie: temperature (NULL tags, 600 rows)
 INSERT INTO std_long_tags
 SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
        'charlie', 'temperature', 3010000 + g, NULL
 FROM generate_series(1, 600) g;
-INSERT 0 600
 -- Copy before compression
 INSERT INTO std_long_tags_expected SELECT * FROM std_long_tags;
-INSERT 0 12800
 -- Verify long tags exist before compression:
 SELECT
     min(length(tags)) AS min_len,
@@ -190,7 +177,6 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('std_long_tags') ch;
 (1 row)
 
 SET max_parallel_workers_per_gather = 0;
-SET
 --------------------------------------------------------------------------------
 -- Full round-trip: compressed data must exactly match the reference table.
 --------------------------------------------------------------------------------
@@ -259,27 +245,27 @@ GROUP BY host ORDER BY host;
 
 -- Batch sorted merge (min/max):
 SELECT min(time), max(time) FROM std_long_tags;
-          min           |          max           
-------------------------+------------------------
- 2025-06-01 00:00:01+00 | 2025-06-01 00:38:20+00
+             min              |             max              
+------------------------------+------------------------------
+ Sun Jun 01 00:00:01 2025 UTC | Sun Jun 01 00:38:20 2025 UTC
 (1 row)
 
 SELECT time, host, metric, length(tags) AS tag_len
 FROM std_long_tags ORDER BY time LIMIT 3;
-          time          | host  |   metric   | tag_len 
-------------------------+-------+------------+---------
- 2025-06-01 00:00:01+00 | alpha | containers |     739
- 2025-06-01 00:00:01+00 | alpha | process    |     126
- 2025-06-01 00:00:01+00 | alpha | requests   |     326
+             time             | host  |   metric   | tag_len 
+------------------------------+-------+------------+---------
+ Sun Jun 01 00:00:01 2025 UTC | alpha | containers |     739
+ Sun Jun 01 00:00:01 2025 UTC | alpha | process    |     126
+ Sun Jun 01 00:00:01 2025 UTC | alpha | requests   |     326
 (3 rows)
 
 SELECT time, host, metric, length(tags) AS tag_len
 FROM std_long_tags ORDER BY time DESC LIMIT 3;
-          time          | host  | metric  | tag_len 
-------------------------+-------+---------+---------
- 2025-06-01 00:38:20+00 | alpha | process |     328
- 2025-06-01 00:38:19+00 | alpha | process |     343
- 2025-06-01 00:38:18+00 | alpha | process |     327
+             time             | host  | metric  | tag_len 
+------------------------------+-------+---------+---------
+ Sun Jun 01 00:38:20 2025 UTC | alpha | process |     328
+ Sun Jun 01 00:38:19 2025 UTC | alpha | process |     343
+ Sun Jun 01 00:38:18 2025 UTC | alpha | process |     327
 (3 rows)
 
 -- Cross-contamination:
@@ -323,8 +309,5 @@ SELECT count(DISTINCT tags) AS distinct_tags FROM std_long_tags;
 (1 row)
 
 RESET max_parallel_workers_per_gather;
-RESET
 DROP TABLE std_long_tags CASCADE;
-DROP TABLE
 DROP TABLE std_long_tags_expected;
-DROP TABLE
