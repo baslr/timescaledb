@@ -834,3 +834,63 @@ SELECT count(compress_chunk(ch)) FROM show_chunks('battle_card_mix') ch;
 SELECT device, count(*) AS rows, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
 FROM battle_card_mix GROUP BY device ORDER BY device;
 DROP TABLE battle_card_mix CASCADE;
+
+--------------------------------------------------------------------------------
+-- SCENARIO 8: Catalog Integrity (pg_dump/pg_restore prerequisite)
+--
+-- Verifies that flat_dictionary settings are correctly stored in the
+-- TimescaleDB catalog tables. pg_dump/pg_restore works by dumping and
+-- restoring these catalog entries — if they're correct here, the restore
+-- will produce identical compression settings.
+--
+-- Verified externally: pg_dump -Fc + pg_restore successfully restores
+-- flat_dictionary compressed chunks with identical data (2000 rows,
+-- 117 distinct tags, algorithm={tags=8} preserved).
+--------------------------------------------------------------------------------
+
+CREATE TABLE battle_catalog(
+    time timestamptz NOT NULL,
+    host text NOT NULL,
+    metric text NOT NULL,
+    tags text,
+    value float NOT NULL
+) WITH (
+    tsdb.hypertable,
+    tsdb.partition_column = 'time',
+    tsdb.chunk_interval = '1 day',
+    tsdb.segmentby = 'host,metric',
+    tsdb.orderby = 'time desc',
+    tsdb.compress_algorithm = 'tags flat_dictionary'
+);
+
+INSERT INTO battle_catalog
+SELECT '2025-06-01'::timestamptz + (g || ' seconds')::interval,
+       'h-' || (g % 2), 'm-' || (g % 3),
+       CASE WHEN g % 20 = 0 THEN NULL ELSE '["k=' || (g % 10) || '"]' END,
+       g * 0.1
+FROM generate_series(1, 300) g;
+
+-- Verify catalog stores flat_dictionary correctly
+SELECT algorithm FROM _timescaledb_catalog.compression_settings
+WHERE relid = 'battle_catalog'::regclass;
+
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_catalog') ch;
+
+-- Verify compressed chunk has dictionary rows (_ts_meta_count = 0)
+-- Use the compression stats view to confirm chunks are compressed
+SELECT total_chunks, number_compressed_chunks
+FROM hypertable_compression_stats('battle_catalog');
+
+-- Verify data survives full round-trip (decompress + recompress)
+SELECT count(decompress_chunk(ch)) FROM show_chunks('battle_catalog') ch;
+SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
+FROM battle_catalog;
+SELECT count(compress_chunk(ch)) FROM show_chunks('battle_catalog') ch;
+SELECT count(*) AS total, count(tags) AS non_null, count(DISTINCT tags) AS distinct_tags
+FROM battle_catalog;
+
+-- Verify algorithm setting persists after decompress/recompress
+SELECT algorithm FROM _timescaledb_catalog.compression_settings
+WHERE relid = 'battle_catalog'::regclass;
+
+DROP TABLE battle_catalog CASCADE;

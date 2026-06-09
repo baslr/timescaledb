@@ -520,3 +520,46 @@ INSERT 0 900
 (3 rows)
 
 DROP TABLE
+CREATE TABLE
+INSERT 0 300
+ algorithm 
+-----------
+ {tags=8}
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+ total_chunks | number_compressed_chunks 
+--------------+--------------------------
+            1 |                        1
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+ total | non_null | distinct_tags 
+-------+----------+---------------
+   300 |      285 |            10
+(1 row)
+
+ count 
+-------
+     1
+(1 row)
+
+ total | non_null | distinct_tags 
+-------+----------+---------------
+   300 |      285 |            10
+(1 row)
+
+ algorithm 
+-----------
+ {tags=8}
+(1 row)
+
+DROP TABLE
