@@ -1011,8 +1011,7 @@ decompress_batches_scan(Relation in_rel, Relation out_rel, Relation index_rel, S
 				int natts = decompressor.in_desc->natts;
 				Datum *dict_datums = palloc(sizeof(Datum) * natts);
 				bool *dict_nulls = palloc(sizeof(bool) * natts);
-				TableScanDesc dict_scan =
-					table_beginscan(in_rel, GetActiveSnapshot(), 0, NULL);
+				TableScanDesc dict_scan = table_beginscan(in_rel, GetActiveSnapshot(), 0, NULL);
 				TupleTableSlot *dict_slot = table_slot_create(in_rel, NULL);
 
 				while (table_scan_getnextslot(dict_scan, ForwardScanDirection, dict_slot))
@@ -1021,19 +1020,20 @@ decompress_batches_scan(Relation in_rel, Relation out_rel, Relation index_rel, S
 					HeapTuple dict_tuple =
 						ExecFetchSlotHeapTuple(dict_slot, false, &should_free_dict);
 
-					heap_deform_tuple(dict_tuple,
-									  decompressor.in_desc,
-									  dict_datums,
-									  dict_nulls);
+					heap_deform_tuple(dict_tuple, decompressor.in_desc, dict_datums, dict_nulls);
 
 					if (should_free_dict)
+					{
 						heap_freetuple(dict_tuple);
+					}
 
-					int32 dict_meta_count = DatumGetInt32(
-						dict_datums[AttrNumberGetAttrOffset(meta_count_attno)]);
+					int32 dict_meta_count =
+						DatumGetInt32(dict_datums[AttrNumberGetAttrOffset(meta_count_attno)]);
 
 					if (dict_meta_count != 0)
+					{
 						continue;
+					}
 
 					/*
 					 * Found a dictionary row. Verify it belongs to the same
@@ -1042,12 +1042,15 @@ decompress_batches_scan(Relation in_rel, Relation out_rel, Relation index_rel, S
 					bool segment_matches = true;
 					for (int col = 0; col < natts; col++)
 					{
-						PerCompressedColumn *column_info =
-							&decompressor.per_compressed_cols[col];
+						PerCompressedColumn *column_info = &decompressor.per_compressed_cols[col];
 						if (column_info->decompressed_column_offset < 0)
+						{
 							continue;
+						}
 						if (column_info->is_compressed)
+						{
 							continue;
+						}
 
 						/* This is a segmentby column — compare values */
 						if (decompressor.compressed_is_nulls[col] != dict_nulls[col])
@@ -1057,8 +1060,7 @@ decompress_batches_scan(Relation in_rel, Relation out_rel, Relation index_rel, S
 						}
 						if (!decompressor.compressed_is_nulls[col] && !dict_nulls[col])
 						{
-							Form_pg_attribute attr =
-								TupleDescAttr(decompressor.in_desc, col);
+							Form_pg_attribute attr = TupleDescAttr(decompressor.in_desc, col);
 							if (!datumIsEqual(decompressor.compressed_datums[col],
 											  dict_datums[col],
 											  attr->attbyval,
