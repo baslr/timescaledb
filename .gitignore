@@ -40,3 +40,4 @@ tags
 /.idea/
 coccinelle.diff
 .gdb_history
+/done

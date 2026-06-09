@@ -1,0 +1,351 @@
+Parsed test spec with 3 sessions
+
+starting permutation: compress_all read_count read_count_tags read_distinct_tags
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7500
+(1 row)
+
+step read_count_tags: 
+    SELECT count(tags) AS non_null_tags FROM fd_concurrent;
+
+non_null_tags
+-------------
+         7425
+(1 row)
+
+step read_distinct_tags: 
+    SELECT count(DISTINCT tags) AS distinct_tags FROM fd_concurrent;
+
+distinct_tags
+-------------
+          297
+(1 row)
+
+
+starting permutation: read_count compress_all read_count
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7500
+(1 row)
+
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7500
+(1 row)
+
+
+starting permutation: compress_begin compress_do read_count compress_commit read_count
+step compress_begin: BEGIN;
+step compress_do: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+ <waiting ...>
+step compress_commit: COMMIT;
+step read_count: <... completed>
+total
+-----
+ 7500
+(1 row)
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7500
+(1 row)
+
+
+starting permutation: compress_all read_count decompress_all read_count
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7500
+(1 row)
+
+step decompress_all: 
+    SELECT count(decompress_chunk(ch)) AS decompressed
+    FROM show_chunks('fd_concurrent') ch;
+
+decompressed
+------------
+           3
+(1 row)
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7500
+(1 row)
+
+
+starting permutation: compress_all decompress_all read_count_tags read_per_device
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step decompress_all: 
+    SELECT count(decompress_chunk(ch)) AS decompressed
+    FROM show_chunks('fd_concurrent') ch;
+
+decompressed
+------------
+           3
+(1 row)
+
+step read_count_tags: 
+    SELECT count(tags) AS non_null_tags FROM fd_concurrent;
+
+non_null_tags
+-------------
+         7425
+(1 row)
+
+step read_per_device: 
+    SELECT device, count(*) AS rows, count(tags) AS non_null
+    FROM fd_concurrent GROUP BY device ORDER BY device;
+
+device|rows|non_null
+------+----+--------
+dev-0 |1500|    1425
+dev-1 |1500|    1500
+dev-2 |1500|    1500
+dev-3 |1500|    1500
+dev-4 |1500|    1500
+(5 rows)
+
+
+starting permutation: compress_all read_ordered decompress_all read_ordered
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_ordered: 
+    SELECT count(*) AS ordered_count
+    FROM (SELECT time, device, tags FROM fd_concurrent ORDER BY time LIMIT 100) sub;
+
+ordered_count
+-------------
+          100
+(1 row)
+
+step decompress_all: 
+    SELECT count(decompress_chunk(ch)) AS decompressed
+    FROM show_chunks('fd_concurrent') ch;
+
+decompressed
+------------
+           3
+(1 row)
+
+step read_ordered: 
+    SELECT count(*) AS ordered_count
+    FROM (SELECT time, device, tags FROM fd_concurrent ORDER BY time LIMIT 100) sub;
+
+ordered_count
+-------------
+          100
+(1 row)
+
+
+starting permutation: read_ordered compress_all read_ordered
+step read_ordered: 
+    SELECT count(*) AS ordered_count
+    FROM (SELECT time, device, tags FROM fd_concurrent ORDER BY time LIMIT 100) sub;
+
+ordered_count
+-------------
+          100
+(1 row)
+
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_ordered: 
+    SELECT count(*) AS ordered_count
+    FROM (SELECT time, device, tags FROM fd_concurrent ORDER BY time LIMIT 100) sub;
+
+ordered_count
+-------------
+          100
+(1 row)
+
+
+starting permutation: read_agg compress_all read_agg
+step read_agg: 
+    SELECT device, min(value), max(value), avg(value)::numeric(10,2)
+    FROM fd_concurrent GROUP BY device ORDER BY device;
+
+device| min|  max|  avg
+------+----+-----+-----
+dev-0 |0.05|   75|37.53
+dev-1 |0.01|74.96|37.49
+dev-2 |0.02|74.97|37.50
+dev-3 |0.03|74.98|37.51
+dev-4 |0.04|74.99|37.52
+(5 rows)
+
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_agg: 
+    SELECT device, min(value), max(value), avg(value)::numeric(10,2)
+    FROM fd_concurrent GROUP BY device ORDER BY device;
+
+device| min|  max|  avg
+------+----+-----+-----
+dev-0 |0.05|   75|37.53
+dev-1 |0.01|74.96|37.49
+dev-2 |0.02|74.97|37.50
+dev-3 |0.03|74.98|37.51
+dev-4 |0.04|74.99|37.52
+(5 rows)
+
+
+starting permutation: compress_all read_agg decompress_all read_agg
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step read_agg: 
+    SELECT device, min(value), max(value), avg(value)::numeric(10,2)
+    FROM fd_concurrent GROUP BY device ORDER BY device;
+
+device| min|  max|  avg
+------+----+-----+-----
+dev-0 |0.05|   75|37.53
+dev-1 |0.01|74.96|37.49
+dev-2 |0.02|74.97|37.50
+dev-3 |0.03|74.98|37.51
+dev-4 |0.04|74.99|37.52
+(5 rows)
+
+step decompress_all: 
+    SELECT count(decompress_chunk(ch)) AS decompressed
+    FROM show_chunks('fd_concurrent') ch;
+
+decompressed
+------------
+           3
+(1 row)
+
+step read_agg: 
+    SELECT device, min(value), max(value), avg(value)::numeric(10,2)
+    FROM fd_concurrent GROUP BY device ORDER BY device;
+
+device| min|  max|  avg
+------+----+-----+-----
+dev-0 |0.05|   75|37.53
+dev-1 |0.01|74.96|37.49
+dev-2 |0.02|74.97|37.50
+dev-3 |0.03|74.98|37.51
+dev-4 |0.04|74.99|37.52
+(5 rows)
+
+
+starting permutation: compress_all insert_new read_count recompress_all read_count
+step compress_all: 
+    SELECT count(compress_chunk(ch)) AS compressed
+    FROM show_chunks('fd_concurrent') ch;
+
+compressed
+----------
+         3
+(1 row)
+
+step insert_new: 
+    INSERT INTO fd_concurrent
+    SELECT '2025-06-01 00:30:00'::timestamptz + (g || ' seconds')::interval,
+           'dev-' || (g % 5),
+           '["job=concurrent-insert","seq=' || g || '"]',
+           10000 + g
+    FROM generate_series(1, 50) g;
+
+step read_count: 
+    SELECT count(*) AS total FROM fd_concurrent;
+
+total
+-----
+ 7550
+(1 row)
+
+PQconsumeInput failed: server closed the connection unexpectedly
+	This probably means the server terminated abnormally
+	before or while processing the request.
+
