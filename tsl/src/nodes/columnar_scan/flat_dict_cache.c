@@ -74,9 +74,11 @@ typedef struct FlatDictHtPrivate
  * that was set just before the call is safe (single-threaded, no reentrancy).
  */
 struct flat_dict_ht_hash;
-static inline uint32 flat_dict_ht_hash_key(struct flat_dict_ht_hash *tb, const char *key);
-static inline bool flat_dict_ht_equal_key(struct flat_dict_ht_hash *tb, const char *a,
-										  const char *b);
+static inline uint32
+flat_dict_ht_hash_key(struct flat_dict_ht_hash *tb, const char *key);
+static inline bool
+flat_dict_ht_equal_key(struct flat_dict_ht_hash *tb, const char *a,
+					   const char *b);
 #include "lib/simplehash.h"
 
 static inline uint32
@@ -87,7 +89,8 @@ flat_dict_ht_hash_key(struct flat_dict_ht_hash *tb, const char *key)
 }
 
 static inline bool
-flat_dict_ht_equal_key(struct flat_dict_ht_hash *tb, const char *a, const char *b)
+flat_dict_ht_equal_key(struct flat_dict_ht_hash *tb,
+					   const char *a, const char *b)
 {
 	FlatDictHtPrivate *priv = (FlatDictHtPrivate *) tb->private_data;
 	/*
@@ -175,7 +178,8 @@ flat_dict_cache_create(MemoryContext mctx, int num_segmentby_cols,
  * self-delimiting.
  */
 static uint32
-flat_dict_cache_build_key(FlatDictCache *cache, TupleTableSlot *slot, const AttrNumber *attnos)
+flat_dict_cache_build_key(FlatDictCache *cache, TupleTableSlot *slot,
+						  const AttrNumber *attnos)
 {
 	if (cache->num_segmentby_cols == 0)
 	{
@@ -226,9 +230,11 @@ flat_dict_cache_build_key(FlatDictCache *cache, TupleTableSlot *slot, const Attr
 		}
 
 		Size max_size = cache->keybuf_size - used;
-		char *end =
-			datum_to_bytes_and_advance(cache->serializers[i], cache->keybuf + used, &max_size,
-									   detoasted);
+		char *end = datum_to_bytes_and_advance(
+			cache->serializers[i],
+			cache->keybuf + used,
+			&max_size,
+			detoasted);
 		used = end - cache->keybuf;
 
 		if (DatumGetPointer(detoasted) != DatumGetPointer(value))
@@ -244,7 +250,8 @@ flat_dict_cache_build_key(FlatDictCache *cache, TupleTableSlot *slot, const Attr
  * public executor insert (scan attnos) and the prefetch (physical attnos).
  */
 static void
-flat_dict_cache_insert_at(FlatDictCache *cache, TupleTableSlot *slot, const AttrNumber *attnos,
+flat_dict_cache_insert_at(FlatDictCache *cache, TupleTableSlot *slot,
+						  const AttrNumber *attnos,
 						  FlatDictionaryContext *ctx)
 {
 	uint32 key_len = flat_dict_cache_build_key(cache, slot, attnos);
@@ -281,7 +288,9 @@ flat_dict_cache_insert_at(FlatDictCache *cache, TupleTableSlot *slot, const Attr
 FlatDictionaryContext *
 flat_dict_cache_lookup(FlatDictCache *cache, TupleTableSlot *compressed_slot)
 {
-	uint32 key_len = flat_dict_cache_build_key(cache, compressed_slot, cache->scan_attnos);
+	uint32 key_len = flat_dict_cache_build_key(cache,
+											   compressed_slot,
+											   cache->scan_attnos);
 	cache->priv.probe_key_len = key_len;
 
 	FlatDictCacheItem *item = flat_dict_ht_lookup(cache->ht, cache->keybuf);
@@ -298,7 +307,9 @@ flat_dict_cache_insert(FlatDictCache *cache, TupleTableSlot *compressed_slot,
 }
 
 void
-flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_relid,
+flat_dict_cache_prefetch(FlatDictCache *cache,
+						 Oid compressed_rel_id,
+						 Oid chunk_relid,
 						 MemoryContext dict_mctx)
 {
 	if (!OidIsValid(compressed_rel_id))
@@ -340,8 +351,9 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_
 			}
 			if (attno == InvalidAttrNumber)
 				elog(ERROR,
-					 "flat_dictionary prefetch: segmentby column \"%s\" not found in compressed "
-					 "chunk",
+					 "flat_dictionary prefetch: segmentby"
+					 " column \"%s\" not found in"
+					 " compressed chunk",
 					 cache->segmentby_columns[i].column_name);
 			physical_attnos[i] = attno;
 		}
@@ -355,11 +367,15 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_
 	 */
 	Relation uncompressed_rel = table_open(chunk_relid, NoLock);
 	MemoryContext old = MemoryContextSwitchTo(dict_mctx);
-	RowDecompressor decompressor =
-		build_decompressor(RelationGetDescr(comp_rel), RelationGetDescr(uncompressed_rel));
+	RowDecompressor decompressor = build_decompressor(
+		RelationGetDescr(comp_rel),
+		RelationGetDescr(uncompressed_rel));
 
 	TupleTableSlot *slot = table_slot_create(comp_rel, NULL);
-	TableScanDesc scan = table_beginscan(comp_rel, GetActiveSnapshot(), 0, (ScanKey) NULL);
+	TableScanDesc scan = table_beginscan(comp_rel,
+										 GetActiveSnapshot(),
+										 0,
+										 (ScanKey) NULL);
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
 	{
@@ -371,8 +387,9 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_
 						  decompressor.compressed_datums,
 						  decompressor.compressed_is_nulls);
 
-		int32 meta_count =
-			DatumGetInt32(decompressor.compressed_datums[decompressor.count_compressed_attindex]);
+		int32 meta_count = DatumGetInt32(
+			decompressor.compressed_datums[
+				decompressor.count_compressed_attindex]);
 
 		if (meta_count == 0)
 		{
@@ -387,7 +404,9 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_
 
 			if (decompressor.flat_dict_ctx != NULL)
 			{
-				flat_dict_cache_insert_at(cache, slot, physical_attnos, decompressor.flat_dict_ctx);
+				flat_dict_cache_insert_at(cache, slot,
+										  physical_attnos,
+										  decompressor.flat_dict_ctx);
 				decompressor.flat_dict_ctx = NULL;
 			}
 			else
@@ -398,7 +417,9 @@ flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id, Oid chunk_
 				 * sentinel so lookups for this segment's data batches hit the
 				 * cache instead of triggering an error.
 				 */
-				flat_dict_cache_insert_at(cache, slot, physical_attnos, FLAT_DICT_CTX_ALL_NULL);
+				flat_dict_cache_insert_at(cache, slot,
+										  physical_attnos,
+										  FLAT_DICT_CTX_ALL_NULL);
 			}
 		}
 

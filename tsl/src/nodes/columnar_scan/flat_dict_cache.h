@@ -57,8 +57,9 @@ typedef struct FlatDictSegmentbyColumn
  * because a chunk without segmentby columns has exactly one segment and one
  * dictionary. The segmentby_columns array is copied into mctx.
  */
-extern FlatDictCache *flat_dict_cache_create(MemoryContext mctx, int num_segmentby_cols,
-											  const FlatDictSegmentbyColumn *segmentby_columns);
+extern FlatDictCache *flat_dict_cache_create(
+	MemoryContext mctx, int num_segmentby_cols,
+	const FlatDictSegmentbyColumn *segmentby_columns);
 
 /*
  * Look up the dictionary for the segment that owns the given compressed tuple
@@ -82,7 +83,8 @@ extern FlatDictionaryContext *flat_dict_cache_lookup(FlatDictCache *cache,
  * own memory context; ctx is stored as-is (it must already live in a
  * scan-lifetime context).
  */
-extern void flat_dict_cache_insert(FlatDictCache *cache, TupleTableSlot *compressed_slot,
+extern void flat_dict_cache_insert(FlatDictCache *cache,
+								   TupleTableSlot *compressed_slot,
 								   FlatDictionaryContext *ctx);
 
 /*
@@ -98,5 +100,7 @@ extern void flat_dict_cache_insert(FlatDictCache *cache, TupleTableSlot *compres
  * (needed for its tuple descriptor). dict_mctx is where the dictionaries are
  * materialized (a scan-lifetime context).
  */
-extern void flat_dict_cache_prefetch(FlatDictCache *cache, Oid compressed_rel_id,
-									 Oid chunk_relid, MemoryContext dict_mctx);
+extern void flat_dict_cache_prefetch(FlatDictCache *cache,
+									 Oid compressed_rel_id,
+									 Oid chunk_relid,
+									 MemoryContext dict_mctx);

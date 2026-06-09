@@ -10,8 +10,9 @@
  *
  * A shared-dictionary-per-segment approach with raw fixed-width index arrays
  * per batch. Unlike the standard DICTIONARY algorithm which builds a dictionary
- * per batch (inefficient for high-cardinality columns), this stores ONE dictionary
- * for the entire segment and each batch is just a raw array of indexes into it.
+ * per batch (inefficient for high-cardinality columns), this stores
+ * ONE dictionary for the entire segment and each batch is just a raw
+ * array of indexes into it.
  *
  * Compression ratio example:
  *   3706 unique tags * ~200 bytes avg = 741 KB dictionary (stored once)
@@ -53,7 +54,9 @@
  * as any batch references the dictionary.
  */
 FlatDictionaryContext *
-flat_dictionary_context_from_array_blob(Datum array_blob, Oid element_type, MemoryContext dest_mctx)
+flat_dictionary_context_from_array_blob(Datum array_blob,
+										Oid element_type,
+										MemoryContext dest_mctx)
 {
 	MemoryContext old_ctx = MemoryContextSwitchTo(dest_mctx);
 
@@ -74,7 +77,8 @@ flat_dictionary_context_from_array_blob(Datum array_blob, Oid element_type, Memo
 
 	if (decompress_all_fn != NULL)
 	{
-		ArrowArray *dict_arrow = decompress_all_fn(array_blob, element_type, dest_mctx);
+		ArrowArray *dict_arrow =
+			decompress_all_fn(array_blob, element_type, dest_mctx);
 
 		num_values = dict_arrow->length;
 		values = palloc(sizeof(Datum) * num_values);
@@ -119,7 +123,8 @@ flat_dictionary_context_from_array_blob(Datum array_blob, Oid element_type, Memo
 	{
 		/* Fallback: iterator-based decompression, two passes (count, collect). */
 		DecompressionIterator *iter =
-			tsl_array_decompression_iterator_from_datum_forward(array_blob, element_type);
+			tsl_array_decompression_iterator_from_datum_forward(
+				array_blob, element_type);
 
 		uint32 count = 0;
 		DecompressResult res;
@@ -137,7 +142,8 @@ flat_dictionary_context_from_array_blob(Datum array_blob, Oid element_type, Memo
 		}
 
 		values = palloc(sizeof(Datum) * count);
-		iter = tsl_array_decompression_iterator_from_datum_forward(array_blob, element_type);
+		iter = tsl_array_decompression_iterator_from_datum_forward(
+			array_blob, element_type);
 		uint32 idx = 0;
 		while (true)
 		{
@@ -183,12 +189,13 @@ pg_attribute_unused() flat_dict_assertions(void)
 							 sizeof(test_val.padding) + sizeof(test_val.element_type) +
 							 sizeof(test_val.num_elements) + sizeof(test_val.trailing_pad),
 					 "FlatDictionaryCompressed wrong size");
-	StaticAssertStmt(sizeof(FlatDictionaryCompressed) == 16, "FlatDictionaryCompressed wrong size");
+	StaticAssertStmt(sizeof(FlatDictionaryCompressed) == 16,
+					 "FlatDictionaryCompressed wrong size");
 }
 
-//////////////////
-/// Compressor ///
-//////////////////
+/* ----------
+ * Compressor
+ * ---------- */
 
 /*
  * The compressor for flat_dictionary batches. During compression, the
@@ -224,7 +231,8 @@ typedef struct FlatDictExtendedCompressor
 static FlatDictionaryBatchCompressor *
 flat_dictionary_batch_compressor_alloc(Oid type, uint8 index_width)
 {
-	FlatDictionaryBatchCompressor *comp = palloc0(sizeof(FlatDictionaryBatchCompressor));
+	FlatDictionaryBatchCompressor *comp =
+		palloc0(sizeof(FlatDictionaryBatchCompressor));
 	comp->capacity = 1024;
 	comp->indexes = palloc(sizeof(uint32) * comp->capacity);
 	comp->nulls = palloc0(sizeof(bool) * comp->capacity);
@@ -236,7 +244,8 @@ flat_dictionary_batch_compressor_alloc(Oid type, uint8 index_width)
 }
 
 static void
-flat_dictionary_batch_compressor_ensure_capacity(FlatDictionaryBatchCompressor *comp)
+flat_dictionary_batch_compressor_ensure_capacity(
+	FlatDictionaryBatchCompressor *comp)
 {
 	if (comp->num_elements >= comp->capacity)
 	{
@@ -251,7 +260,8 @@ flat_dictionary_batch_compressor_ensure_capacity(FlatDictionaryBatchCompressor *
  * the value to its dictionary index during Pass 2).
  */
 static void
-flat_dictionary_batch_append_index(FlatDictionaryBatchCompressor *comp, uint32 index)
+flat_dictionary_batch_append_index(FlatDictionaryBatchCompressor *comp,
+								   uint32 index)
 {
 	flat_dictionary_batch_compressor_ensure_capacity(comp);
 	comp->indexes[comp->num_elements] = index;
@@ -356,9 +366,9 @@ flat_dictionary_batch_finish(FlatDictionaryBatchCompressor *comp)
 	return compressed;
 }
 
-/////////////////////////////
-/// Compressor Interface  ///
-/////////////////////////////
+/* ----------
+ * Compressor Interface
+ * ---------- */
 
 /*
  * Note: The standard Compressor interface expects append_val(Datum).
@@ -382,7 +392,8 @@ flat_dict_compressor_append_val(Compressor *compressor, Datum val)
 		 * from the final dictionary cardinality. Indexes are stored as uint32
 		 * internally regardless. */
 		ext->internal =
-			flat_dictionary_batch_compressor_alloc(ext->element_type, FLAT_DICT_WIDTH_32);
+			flat_dictionary_batch_compressor_alloc(ext->element_type,
+												  FLAT_DICT_WIDTH_32);
 	}
 	flat_dictionary_batch_append_index(ext->internal, DatumGetUInt32(val));
 }
@@ -394,7 +405,8 @@ flat_dict_compressor_append_null(Compressor *compressor)
 	if (ext->internal == NULL)
 	{
 		ext->internal =
-			flat_dictionary_batch_compressor_alloc(ext->element_type, FLAT_DICT_WIDTH_32);
+			flat_dictionary_batch_compressor_alloc(ext->element_type,
+												  FLAT_DICT_WIDTH_32);
 	}
 	flat_dictionary_batch_append_null(ext->internal);
 }
@@ -504,15 +516,16 @@ flat_dictionary_compressor_for_type(Oid element_type)
  * the optimal index width from the builder's cardinality.
  */
 void
-flat_dictionary_compressor_set_builder(Compressor *compressor, FlatDictionaryBuilder *builder)
+flat_dictionary_compressor_set_builder(Compressor *compressor,
+									   FlatDictionaryBuilder *builder)
 {
 	FlatDictExtendedCompressor *ext = (FlatDictExtendedCompressor *) compressor;
 	ext->builder = builder;
 }
 
-//////////////////////
-/// Decompression  ///
-//////////////////////
+/* ----------
+ * Decompression
+ * ---------- */
 
 typedef struct FlatDictionaryDecompressionIterator
 {
@@ -550,7 +563,9 @@ tsl_flat_dictionary_decompression_iterator_from_datum_forward(Datum compressed_d
 {
 	if (ctx == NULL)
 	{
-		elog(ERROR, "flat_dictionary: no dictionary context provided for decompression");
+		elog(ERROR,
+			 "flat_dictionary: no dictionary context"
+			 " provided for decompression");
 	}
 
 	const FlatDictionaryCompressed *header =
@@ -579,17 +594,21 @@ tsl_flat_dictionary_decompression_iterator_from_datum_forward(Datum compressed_d
 		si.len = VARSIZE(header) - sizeof(FlatDictionaryCompressed) - data_size;
 		si.cursor = 0;
 		si.maxlen = si.len;
-		Simple8bRleSerialized *nulls_serialized = bytes_deserialize_simple8b_and_advance(&si);
-		simple8brle_decompression_iterator_init_forward(&iter->nulls_iter, nulls_serialized);
+		Simple8bRleSerialized *nulls_serialized =
+			bytes_deserialize_simple8b_and_advance(&si);
+		simple8brle_decompression_iterator_init_forward(
+			&iter->nulls_iter, nulls_serialized);
 	}
 
 	return &iter->base;
 }
 
 DecompressResult
-flat_dictionary_decompression_iterator_try_next_forward(DecompressionIterator *base_iter)
+flat_dictionary_decompression_iterator_try_next_forward(
+	DecompressionIterator *base_iter)
 {
-	FlatDictionaryDecompressionIterator *iter = (FlatDictionaryDecompressionIterator *) base_iter;
+	FlatDictionaryDecompressionIterator *iter =
+		(FlatDictionaryDecompressionIterator *) base_iter;
 
 	if (iter->current_pos >= iter->compressed->num_elements)
 	{
@@ -607,8 +626,9 @@ flat_dictionary_decompression_iterator_try_next_forward(DecompressionIterator *b
 		}
 	}
 
-	uint32 index =
-		flat_dict_read_index(iter->index_data, iter->compressed->index_width, iter->current_pos);
+	uint32 index = flat_dict_read_index(iter->index_data,
+										iter->compressed->index_width,
+										iter->current_pos);
 	iter->current_pos++;
 
 	Assert(index < iter->dict_ctx->num_values);
@@ -624,7 +644,9 @@ tsl_flat_dictionary_decompression_iterator_from_datum_reverse(Datum compressed_d
 {
 	if (ctx == NULL)
 	{
-		elog(ERROR, "flat_dictionary: no dictionary context provided for decompression");
+		elog(ERROR,
+			 "flat_dictionary: no dictionary context"
+			 " provided for decompression");
 	}
 
 	const FlatDictionaryCompressed *header =
@@ -653,17 +675,21 @@ tsl_flat_dictionary_decompression_iterator_from_datum_reverse(Datum compressed_d
 		si.len = VARSIZE(header) - sizeof(FlatDictionaryCompressed) - data_size;
 		si.cursor = 0;
 		si.maxlen = si.len;
-		Simple8bRleSerialized *nulls_serialized = bytes_deserialize_simple8b_and_advance(&si);
-		simple8brle_decompression_iterator_init_reverse(&iter->nulls_iter, nulls_serialized);
+		Simple8bRleSerialized *nulls_serialized =
+			bytes_deserialize_simple8b_and_advance(&si);
+		simple8brle_decompression_iterator_init_reverse(
+			&iter->nulls_iter, nulls_serialized);
 	}
 
 	return &iter->base;
 }
 
 DecompressResult
-flat_dictionary_decompression_iterator_try_next_reverse(DecompressionIterator *base_iter)
+flat_dictionary_decompression_iterator_try_next_reverse(
+	DecompressionIterator *base_iter)
 {
-	FlatDictionaryDecompressionIterator *iter = (FlatDictionaryDecompressionIterator *) base_iter;
+	FlatDictionaryDecompressionIterator *iter =
+		(FlatDictionaryDecompressionIterator *) base_iter;
 
 	if (iter->current_pos == 0)
 	{
@@ -682,8 +708,9 @@ flat_dictionary_decompression_iterator_try_next_reverse(DecompressionIterator *b
 		}
 	}
 
-	uint32 index =
-		flat_dict_read_index(iter->index_data, iter->compressed->index_width, iter->current_pos);
+	uint32 index = flat_dict_read_index(iter->index_data,
+										iter->compressed->index_width,
+										iter->current_pos);
 
 	Assert(index < iter->dict_ctx->num_values);
 	Datum val = iter->dict_ctx->values[index];
@@ -691,16 +718,18 @@ flat_dictionary_decompression_iterator_try_next_reverse(DecompressionIterator *b
 	return (DecompressResult){ .val = val };
 }
 
-////////////////////////
-/// decompress_all   ///
-////////////////////////
+/* ----------
+ * decompress_all
+ * ---------- */
 
 /*
  * Bulk decompression — returns an ArrowArray with all values resolved
  * from the dictionary. This is the fast path used by vectorized execution.
  */
 ArrowArray *
-flat_dictionary_decompress_all(Datum compressed_data, Oid element_type, FlatDictionaryContext *ctx,
+flat_dictionary_decompress_all(Datum compressed_data,
+							   Oid element_type,
+							   FlatDictionaryContext *ctx,
 							   MemoryContext dest_mctx)
 {
 	/*
@@ -715,7 +744,8 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type, FlatDict
 	Assert(header->compression_algorithm == COMPRESSION_ALGORITHM_FLAT_DICTIONARY);
 
 	uint16 n = header->num_elements;
-	const char *index_data = (const char *) header + sizeof(FlatDictionaryCompressed);
+	const char *index_data =
+		(const char *) header + sizeof(FlatDictionaryCompressed);
 
 	MemoryContext old_ctx = MemoryContextSwitchTo(dest_mctx);
 
@@ -769,16 +799,20 @@ flat_dictionary_decompress_all(Datum compressed_data, Oid element_type, FlatDict
 			dict_data_size += VARSIZE_ANY_EXHDR(DatumGetPointer(ctx->values[d]));
 		}
 
-		uint32 *dict_offsets =
-			(uint32 *) palloc(pad_to_multiple(64, sizeof(uint32) * (ctx->num_values + 1)));
+		uint32 *dict_offsets = (uint32 *) palloc(
+			pad_to_multiple(64,
+							sizeof(uint32) * (ctx->num_values + 1)));
 		char *dict_data = palloc(pad_to_multiple(64, dict_data_size + 1));
 
 		uint32 dict_off = 0;
 		dict_offsets[0] = 0;
 		for (uint32 d = 0; d < ctx->num_values; d++)
 		{
-			Size len = VARSIZE_ANY_EXHDR(DatumGetPointer(ctx->values[d]));
-			memcpy(dict_data + dict_off, VARDATA_ANY(DatumGetPointer(ctx->values[d])), len);
+			Size len =
+				VARSIZE_ANY_EXHDR(DatumGetPointer(ctx->values[d]));
+			memcpy(dict_data + dict_off,
+				   VARDATA_ANY(DatumGetPointer(ctx->values[d])),
+				   len);
 			dict_off += len;
 			dict_offsets[d + 1] = dict_off;
 		}
@@ -881,7 +915,9 @@ flat_dictionary_iterator_init_reverse_stub(Datum compressed, Oid element_type)
 }
 
 ArrowArray *
-flat_dictionary_decompress_all_stub(Datum compressed, Oid element_type, MemoryContext dest_mctx)
+flat_dictionary_decompress_all_stub(Datum compressed,
+									Oid element_type,
+									MemoryContext dest_mctx)
 {
 	elog(ERROR,
 		 "flat_dictionary cannot be decompressed without its segment dictionary; "
@@ -889,9 +925,9 @@ flat_dictionary_decompress_all_stub(Datum compressed, Oid element_type, MemoryCo
 	pg_unreachable();
 }
 
-/////////////////////
-/// Send / Recv   ///
-/////////////////////
+/* ----------
+ * Send / Recv
+ * ---------- */
 
 void
 flat_dictionary_compressed_send(CompressedDataHeader *header, StringInfo buffer)
@@ -904,7 +940,9 @@ flat_dictionary_compressed_send(CompressedDataHeader *header, StringInfo buffer)
 	pq_sendbyte(buffer, fc->index_width);
 	pq_sendint32(buffer, fc->element_type);
 	pq_sendint16(buffer, fc->num_elements);
-	pq_sendbytes(buffer, (const char *) fc + sizeof(FlatDictionaryCompressed), data_size);
+	pq_sendbytes(buffer,
+				 (const char *) fc + sizeof(FlatDictionaryCompressed),
+				 data_size);
 }
 
 Datum
@@ -938,9 +976,9 @@ flat_dictionary_compressed_recv(StringInfo buf)
 	return PointerGetDatum(compressed);
 }
 
-///////////////////////////////
-/// Pass 1: Dictionary Build //
-///////////////////////////////
+/* ----------
+ * Pass 1: Dictionary Build
+ * ---------- */
 
 #include "datum_serialize.h"
 #include "dictionary_hash.h"
